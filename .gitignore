@@ -1,0 +1,8 @@
+/target/
+/node_modules/
+/dist/
+/bin/
+*.local
+*.local/
+*.log
+.DS_Store

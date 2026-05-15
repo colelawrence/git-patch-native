@@ -1,0 +1,54 @@
+{
+  "name": "git-patch-native",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Generate git-style unified patch strings from in-memory source changes, powered by Rust.",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "scripts": {
+    "build": "npm run build:native && tsc",
+    "build:native": "cargo build --release -p git-patch-napi && node scripts/copy-native.mjs release",
+    "build:native:debug": "cargo build -p git-patch-napi && node scripts/copy-native.mjs debug",
+    "test": "npm run build && node test/e2e.mjs",
+    "test:bun": "npm run build && bun test/e2e.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "git",
+    "patch",
+    "diff",
+    "unified-diff",
+    "node",
+    "bun",
+    "rust",
+    "native"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.0.0"
+  }
+}

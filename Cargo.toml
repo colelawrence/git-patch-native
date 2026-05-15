@@ -1,0 +1,19 @@
+[workspace]
+members = [
+  "crates/git-patch-core",
+  "crates/git-patch-napi",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/phosphor/git-patch-native"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

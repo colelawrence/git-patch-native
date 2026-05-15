@@ -1,0 +1,3 @@
+[submodule ".references/fff-package"]
+	path = .references/fff-package
+	url = https://github.com/dmtrKovalenko/fff.git
