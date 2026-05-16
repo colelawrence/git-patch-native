@@ -22,6 +22,7 @@
     "stage:platform-package": "node scripts/stage-platform-package.mjs",
     "sync:package-versions": "node scripts/sync-package-versions.mjs",
     "release:postcheck": "node scripts/release-postcheck.mjs",
+    "release:notes": "node scripts/generate-release-notes.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "cargo clippy --all-targets --all-features -- -D warnings && cargo test && npm run typecheck && npm test && npm run test:bun && npm run smoke:pack",
     "smoke:pack": "npm run smoke:pack:node-api && npm run smoke:pack:bun-ffi",

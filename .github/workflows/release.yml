@@ -37,8 +37,13 @@ jobs:
         shell: bash
         run: |
           version="$(node -p "require('./package.json').version")"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+          tag="v${version}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${tag}" ]]; then
             echo "Tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2
+            exit 1
+          fi
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Release tag ${tag} must exist before publishing" >&2
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -170,3 +175,29 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm run release:postcheck -- --stage=all
+
+  github-release:
+    name: Create GitHub Release
+    needs: [verify, release-postcheck]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: npm run --silent release:notes > "${RUNNER_TEMP}/release-notes.md"
+      - name: Create or update GitHub Release
+        shell: bash
+        run: |
+          tag="v${{ needs.verify.outputs.version }}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release edit "${tag}" --title "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md"
+          else
+            gh release create "${tag}" --title "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md" --verify-tag
+          fi
