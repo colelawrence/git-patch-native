@@ -116,8 +116,6 @@ jobs:
         run: npm run smoke:pack
       - name: Publish platform package with provenance
         working-directory: npm/${{ matrix.package }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
         run: |
           if npm view "${{ matrix.package }}@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
@@ -146,8 +144,6 @@ jobs:
           npm pack --dry-run --ignore-scripts --json > pack.json
           node -e "const p=require('./pack.json')[0]; if (p.files.some(f => f.path.startsWith('bin/'))) throw new Error('main package must not include bin/ artifacts')"
       - name: Publish main package with provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if npm view "git-patch-native@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
             echo "git-patch-native@${{ needs.verify.outputs.version }} already published"
