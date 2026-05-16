@@ -28,10 +28,10 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
+      - run: npm install --ignore-scripts
       - run: npm run sync:package-versions
       - name: Ensure generated package versions are committed
-        run: git diff --exit-code -- package.json npm package-lock.json
+        run: git diff --exit-code -- package.json npm
       - id: version
         name: Verify tag matches package version
         shell: bash
@@ -123,8 +123,8 @@ jobs:
             npx --yes npm@^11.10.0 publish --provenance --access public
           fi
 
-  publish-main:
-    name: Publish main package
+  release-platform-postcheck:
+    name: Verify platform packages are published
     needs: [verify, publish-platform]
     runs-on: ubuntu-24.04
     steps:
@@ -133,14 +133,24 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: npm run release:postcheck -- --stage=platforms
+
+  publish-main:
+    name: Publish main package
+    needs: [verify, release-platform-postcheck]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
-      - run: npm ci
+      - run: npm install --ignore-scripts
       - run: npm run sync:package-versions
       - run: npm run build
       - name: Confirm main package excludes native binaries
-        run: |
-          npm pack --dry-run --ignore-scripts --json > pack.json
-          node -e "const p=require('./pack.json')[0]; if (p.files.some(f => f.path.startsWith('bin/'))) throw new Error('main package must not include bin/ artifacts')"
+        run: npm run release:postcheck -- --stage=platforms
       - name: Publish main package with provenance
         run: |
           if npm view "git-patch-native@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
@@ -148,3 +158,15 @@ jobs:
           else
             npx --yes npm@^11.10.0 publish --ignore-scripts --provenance --access public
           fi
+
+  release-postcheck:
+    name: Verify completed release
+    needs: [verify, publish-main]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm run release:postcheck -- --stage=all

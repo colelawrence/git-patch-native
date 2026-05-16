@@ -75,11 +75,13 @@ This package uses a two-tier npm publish shape:
 - `git-patch-native` publishes the JS/TypeScript SDK once.
 - `git-patch-native-<platform>` packages publish native Node-API and Bun FFI artifacts from a GitHub Actions matrix.
 
-Release tags are `v<package.json version>`, for example `v0.1.0`. The release workflow publishes with npm provenance:
+Current prebuilt platforms are `darwin-arm64`, `linux-x64-gnu`, `linux-arm64-gnu`, `win32-x64`, and `win32-arm64`. Intel macOS and musl Linux are intentionally unsupported until a runner/build path is added.
+
+Release tags are `v<package.json version>`, for example `v0.2.0`. The release workflow publishes with npm provenance and runs postchecks before and after the root package publish:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Before the first release, configure npm Trusted Publishing for the main package and each platform package. Use repository `colelawrence/git-patch-native` and workflow `.github/workflows/release.yml`.
@@ -87,7 +89,7 @@ Before the first release, configure npm Trusted Publishing for the main package 
 After publishing, verify package signatures/provenance metadata with npm:
 
 ```sh
-npm view git-patch-native@0.1.0 dist.integrity dist.signatures
+npm view git-patch-native@0.2.0 dist.integrity dist.signatures
 mkdir /tmp/git-patch-native-verify && cd /tmp/git-patch-native-verify
 npm init -y
 npm install git-patch-native@0.1.0

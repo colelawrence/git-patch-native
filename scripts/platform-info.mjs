@@ -56,14 +56,15 @@ export function currentPlatform() {
 export function currentPlatformTag() {
   if (process.env.GIT_PATCH_PLATFORM_TAG) return process.env.GIT_PATCH_PLATFORM_TAG;
 
-  if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64";
-  if (process.platform === "win32") return process.arch === "arm64" ? "win32-arm64" : "win32-x64";
-  if (process.platform === "linux") {
-    const arch = process.arch === "arm64" ? "arm64" : "x64";
-    return `linux-${arch}-${isMusl() ? "musl" : "gnu"}`;
+  if (process.platform === "darwin" && process.arch === "arm64") return "darwin-arm64";
+  if (process.platform === "win32" && process.arch === "arm64") return "win32-arm64";
+  if (process.platform === "win32" && process.arch === "x64") return "win32-x64";
+  if (process.platform === "linux" && !isMusl()) {
+    if (process.arch === "arm64") return "linux-arm64-gnu";
+    if (process.arch === "x64") return "linux-x64-gnu";
   }
 
-  throw new Error(`Unsupported platform: ${process.platform}`);
+  throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
 }
 
 export function nativeNodeFilename(platform = currentPlatform()) {

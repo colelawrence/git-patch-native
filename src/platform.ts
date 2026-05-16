@@ -78,8 +78,6 @@ function npmPlatformTag(): string {
   switch (getTriple()) {
     case "aarch64-apple-darwin":
       return "darwin-arm64";
-    case "x86_64-apple-darwin":
-      return "darwin-x64";
     case "x86_64-unknown-linux-gnu":
       return "linux-x64-gnu";
     case "aarch64-unknown-linux-gnu":
@@ -95,7 +93,6 @@ function npmPlatformTag(): string {
 
 const TRIPLE_TO_NPM_PACKAGE: Record<string, string> = {
   "aarch64-apple-darwin": "git-patch-native-darwin-arm64",
-  "x86_64-apple-darwin": "git-patch-native-darwin-x64",
   "x86_64-unknown-linux-gnu": "git-patch-native-linux-x64-gnu",
   "aarch64-unknown-linux-gnu": "git-patch-native-linux-arm64-gnu",
   "x86_64-pc-windows-msvc": "git-patch-native-win32-x64",
