@@ -8,14 +8,6 @@ export const PLATFORMS = [
     ffiExtension: "dylib",
   },
   {
-    tag: "darwin-x64",
-    packageName: "git-patch-native-darwin-x64",
-    os: "darwin",
-    cpu: "x64",
-    rustTarget: "x86_64-apple-darwin",
-    ffiExtension: "dylib",
-  },
-  {
     tag: "linux-x64-gnu",
     packageName: "git-patch-native-linux-x64-gnu",
     os: "linux",
