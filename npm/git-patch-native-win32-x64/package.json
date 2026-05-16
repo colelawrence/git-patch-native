@@ -1,6 +1,6 @@
 {
   "name": "git-patch-native-win32-x64",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "description": "Native binaries for git-patch-native on win32/x64.",
   "os": [
