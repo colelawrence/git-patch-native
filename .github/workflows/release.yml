@@ -143,7 +143,7 @@ jobs:
       - run: npm run build
       - name: Confirm main package excludes native binaries
         run: |
-          npm pack --dry-run --json > pack.json
+          npm pack --dry-run --ignore-scripts --json > pack.json
           node -e "const p=require('./pack.json')[0]; if (p.files.some(f => f.path.startsWith('bin/'))) throw new Error('main package must not include bin/ artifacts')"
       - name: Publish main package with provenance
         env:
