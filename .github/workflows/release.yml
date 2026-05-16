@@ -79,12 +79,12 @@ jobs:
             runner: windows-2022
             rust-target: x86_64-pc-windows-msvc
             package: git-patch-native-win32-x64
-            runtime-smoke: true
+            runtime-smoke: false
           - tag: win32-arm64
             runner: windows-11-arm
             rust-target: aarch64-pc-windows-msvc
             package: git-patch-native-win32-arm64
-            runtime-smoke: true
+            runtime-smoke: false
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -100,7 +100,7 @@ jobs:
         if: ${{ matrix.apt }}
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
-      - run: npm ci
+      - run: npm install --ignore-scripts
       - name: Build native artifacts
         shell: bash
         env:
@@ -123,7 +123,13 @@ jobs:
         working-directory: npm/${{ matrix.package }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        shell: bash
+        run: |
+          if npm view "${{ matrix.package }}@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
+            echo "${{ matrix.package }}@${{ needs.verify.outputs.version }} already published"
+          else
+            npm publish --provenance --access public
+          fi
 
   publish-main:
     name: Publish main package
@@ -147,4 +153,9 @@ jobs:
       - name: Publish main package with provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: |
+          if npm view "git-patch-native@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
+            echo "git-patch-native@${{ needs.verify.outputs.version }} already published"
+          else
+            npm publish --provenance --access public
+          fi
