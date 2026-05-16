@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { currentPlatform } from "./platform-info.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const platform = currentPlatform();
 const temp = mkdtempSync(join(tmpdir(), "git-patch-native-node-api-"));
 const packDir = join(temp, "pack");
@@ -13,12 +14,12 @@ const consumerDir = join(temp, "consumer");
 mkdirSync(packDir, { recursive: true });
 mkdirSync(consumerDir, { recursive: true });
 
-execFileSync("npm", ["run", "stage:platform-package"], { cwd: root, stdio: "inherit" });
+execFileSync(npm, ["run", "stage:platform-package"], { cwd: root, stdio: "inherit" });
 const platformPack = npmPack(join(root, "npm", platform.packageName));
 const rootPack = npmPack(root);
 
 writeFileSync(join(consumerDir, "package.json"), JSON.stringify({ type: "module", private: true }));
-execFileSync("npm", ["install", "--ignore-scripts", platformPack, rootPack], {
+execFileSync(npm, ["install", "--ignore-scripts", platformPack, rootPack], {
   cwd: consumerDir,
   stdio: "inherit",
 });
@@ -37,7 +38,7 @@ writeFileSync(join(consumerDir, "smoke.mjs"), smoke);
 execFileSync(process.execPath, ["smoke.mjs"], { cwd: consumerDir, stdio: "inherit" });
 
 function npmPack(cwd) {
-  const packOutput = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+  const packOutput = execFileSync(npm, ["pack", "--json", "--pack-destination", packDir], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],

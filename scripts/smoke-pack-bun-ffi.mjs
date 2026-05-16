@@ -5,6 +5,8 @@ import { join, resolve } from "node:path";
 import { currentPlatform, nativeFfiFilename } from "./platform-info.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
+const bun = process.platform === "win32" ? "bun.exe" : "bun";
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const platform = currentPlatform();
 const temp = mkdtempSync(join(tmpdir(), "git-patch-native-bun-ffi-"));
 const packDir = join(temp, "pack");
@@ -13,12 +15,12 @@ const consumerDir = join(temp, "consumer");
 mkdirSync(packDir, { recursive: true });
 mkdirSync(consumerDir, { recursive: true });
 
-execFileSync("npm", ["run", "stage:platform-package"], { cwd: root, stdio: "inherit" });
+execFileSync(npm, ["run", "stage:platform-package"], { cwd: root, stdio: "inherit" });
 const platformPack = npmPack(join(root, "npm", platform.packageName));
 const rootPack = npmPack(root);
 
 writeFileSync(join(consumerDir, "package.json"), JSON.stringify({ type: "module", private: true }));
-execFileSync("bun", ["install", platformPack, rootPack], { cwd: consumerDir, stdio: "inherit" });
+execFileSync(bun, ["install", platformPack, rootPack], { cwd: consumerDir, stdio: "inherit" });
 
 const smoke = `
   import assert from "node:assert/strict";
@@ -59,10 +61,10 @@ const smoke = `
   console.log("bun-ffi package smoke ok");
 `;
 writeFileSync(join(consumerDir, "smoke.mjs"), smoke);
-execFileSync("bun", ["smoke.mjs"], { cwd: consumerDir, stdio: "inherit" });
+execFileSync(bun, ["smoke.mjs"], { cwd: consumerDir, stdio: "inherit" });
 
 function npmPack(cwd) {
-  const packOutput = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+  const packOutput = execFileSync(npm, ["pack", "--json", "--pack-destination", packDir], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "inherit"],
