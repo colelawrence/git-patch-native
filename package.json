@@ -53,6 +53,14 @@
     "native"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colelawrence/git-patch-native.git"
+  },
+  "bugs": {
+    "url": "https://github.com/colelawrence/git-patch-native/issues"
+  },
+  "homepage": "https://github.com/colelawrence/git-patch-native#readme",
   "publishConfig": {
     "access": "public"
   },
