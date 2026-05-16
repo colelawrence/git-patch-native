@@ -53,6 +53,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-patch-ffi"
+version = "0.1.0"
+dependencies = [
+ "git-patch-core",
+ "serde_json",
+]
+
+[[package]]
 name = "git-patch-napi"
 version = "0.1.0"
 dependencies = [

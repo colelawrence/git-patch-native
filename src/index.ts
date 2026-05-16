@@ -5,12 +5,14 @@ export type {
   Changes,
   FileChange,
   FileContent,
+  FileModeChange,
   GeneratePatchOptions,
+  GitFileMode,
   GeneratePatchRequest,
   Path,
   RenameDetail,
 } from "./types.js";
-export { getNativeFilename, getNpmPackageName, getTriple } from "./platform.js";
+export { getFfiFilename, getNativeFilename, getNpmPackageName, getTriple } from "./platform.js";
 export { nativeBindingExists };
 
 export function generatePatch(changes: Changes, options?: GeneratePatchOptions): string;

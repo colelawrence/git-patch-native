@@ -251,10 +251,104 @@ const scenarios = [
     after: { "line-endings.txt": "a\r\n" },
   },
   {
-    name: "add executable file",
+    name: "add executable file with scalar mode shorthand",
     changes: { "script.sh": { after: "#!/bin/sh\necho hi\n", mode: "100755" } },
     after: { "script.sh": "#!/bin/sh\necho hi\n" },
     afterModes: { "script.sh": "755" },
+  },
+  {
+    name: "add executable file with mode.after",
+    changes: { "bin/tool.sh": { after: "#!/bin/sh\necho tool\n", mode: { after: "100755" } } },
+    after: { "bin/tool.sh": "#!/bin/sh\necho tool\n" },
+    afterModes: { "bin/tool.sh": "755" },
+  },
+  {
+    name: "delete executable file with mode.before",
+    before: { "old-tool.sh": "#!/bin/sh\necho old\n" },
+    beforeModes: { "old-tool.sh": "755" },
+    changes: { "old-tool.sh": { before: "#!/bin/sh\necho old\n", mode: { before: "100755" } } },
+    after: {},
+  },
+  {
+    name: "chmod only to executable",
+    before: { "script.sh": "#!/bin/sh\necho hi\n" },
+    beforeModes: { "script.sh": "644" },
+    changes: {
+      "script.sh": {
+        before: "#!/bin/sh\necho hi\n",
+        after: "#!/bin/sh\necho hi\n",
+        mode: { before: "100644", after: "100755" },
+      },
+    },
+    after: { "script.sh": "#!/bin/sh\necho hi\n" },
+    afterModes: { "script.sh": "755" },
+    inspect(patch) {
+      assert.equal(patch, "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n");
+    },
+  },
+  {
+    name: "chmod only to regular",
+    before: { "script.sh": "#!/bin/sh\necho hi\n" },
+    beforeModes: { "script.sh": "755" },
+    changes: {
+      "script.sh": {
+        before: "#!/bin/sh\necho hi\n",
+        after: "#!/bin/sh\necho hi\n",
+        mode: { before: "100755", after: "100644" },
+      },
+    },
+    after: { "script.sh": "#!/bin/sh\necho hi\n" },
+    afterModes: { "script.sh": "644" },
+  },
+  {
+    name: "edit plus chmod",
+    before: { "script.sh": "#!/bin/sh\necho hi\n" },
+    beforeModes: { "script.sh": "644" },
+    changes: {
+      "script.sh": {
+        before: "#!/bin/sh\necho hi\n",
+        after: "#!/bin/sh\necho bye\n",
+        mode: { before: "100644", after: "100755" },
+      },
+    },
+    after: { "script.sh": "#!/bin/sh\necho bye\n" },
+    afterModes: { "script.sh": "755" },
+    inspect(patch) {
+      assert.match(patch, /old mode 100644\nnew mode 100755\n--- a\/script\.sh\n\+\+\+ b\/script\.sh/);
+    },
+  },
+  {
+    name: "rename plus chmod",
+    before: { "old.sh": "#!/bin/sh\necho same\n" },
+    beforeModes: { "old.sh": "644" },
+    changes: {
+      "new.sh": {
+        moved: "old.sh",
+        before: "#!/bin/sh\necho same\n",
+        after: "#!/bin/sh\necho same\n",
+        mode: { before: "100644", after: "100755" },
+      },
+    },
+    after: { "new.sh": "#!/bin/sh\necho same\n" },
+    afterModes: { "new.sh": "755" },
+    inspect(patch) {
+      assert.match(patch, /old mode 100644\nnew mode 100755\nsimilarity index 100%\nrename from old\.sh\nrename to new\.sh/);
+    },
+  },
+  {
+    name: "rename edit plus chmod",
+    before: { "old.sh": "#!/bin/sh\necho one\necho two\necho three\n" },
+    beforeModes: { "old.sh": "644" },
+    changes: {
+      "new.sh": {
+        moved: { from: "old.sh", similarity: 80 },
+        before: "#!/bin/sh\necho one\necho two\necho three\n",
+        after: "#!/bin/sh\necho one\necho TWO\necho three\n",
+        mode: { before: "100644", after: "100755" },
+      },
+    },
+    after: { "new.sh": "#!/bin/sh\necho one\necho TWO\necho three\n" },
+    afterModes: { "new.sh": "755" },
   },
 ];
 
@@ -347,7 +441,12 @@ for (const [name, changes, message] of [
   ["duplicate normalized path", { "dir/file.txt": { after: "one\n" }, "dir\\file.txt": { after: "two\n" } }, /duplicate normalized path/],
   ["invalid similarity", { "new.txt": { moved: { from: "old.txt", similarity: 101 }, before: "x\n", after: "x\n" } }, /similarity/],
   ["invalid mode", { "bad.txt": { after: "x\n", mode: "100600" } }, /mode must/],
-  ["mode on modification", { "bad.txt": { before: "x\n", after: "y\n", mode: "100755" } }, /oldMode\/newMode/],
+  ["scalar mode on modification", { "bad.txt": { before: "x\n", after: "y\n", mode: "100755" } }, /mode\.before and mode\.after/],
+  ["add with mode.before", { "bad.txt": { after: "x\n", mode: { before: "100644" } } }, /mode\.before is not valid/],
+  ["add with empty mode object", { "bad.txt": { after: "x\n", mode: {} } }, /mode\.after is required/],
+  ["delete with mode.after", { "bad.txt": { before: "x\n", mode: { after: "100644" } } }, /mode\.after is not valid/],
+  ["delete with empty mode object", { "bad.txt": { before: "x\n", mode: {} } }, /mode\.before is required/],
+  ["modification with partial mode", { "bad.txt": { before: "x\n", after: "y\n", mode: { after: "100755" } } }, /require both mode\.before and mode\.after/],
   ["move without before", { "new.txt": { moved: "old.txt", after: "x\n" } }, /moved requires/],
 ]) {
   assert.throws(() => generatePatch(changes), message, name);

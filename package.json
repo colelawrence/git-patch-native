@@ -13,13 +13,19 @@
     }
   },
   "files": [
-    "dist",
-    "bin"
+    "dist"
   ],
   "scripts": {
     "build": "npm run build:native && tsc",
-    "build:native": "cargo build --release -p git-patch-napi && node scripts/copy-native.mjs release",
-    "build:native:debug": "cargo build -p git-patch-napi && node scripts/copy-native.mjs debug",
+    "build:native": "cargo build --release -p git-patch-napi -p git-patch-ffi && node scripts/copy-native.mjs release",
+    "build:native:debug": "cargo build -p git-patch-napi -p git-patch-ffi && node scripts/copy-native.mjs debug",
+    "stage:platform-package": "node scripts/stage-platform-package.mjs",
+    "sync:package-versions": "node scripts/sync-package-versions.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "cargo clippy --all-targets --all-features -- -D warnings && cargo test && npm run typecheck && npm test && npm run test:bun && npm run smoke:pack",
+    "smoke:pack": "npm run smoke:pack:node-api && npm run smoke:pack:bun-ffi",
+    "smoke:pack:bun-ffi": "bun scripts/smoke-pack-bun-ffi.mjs",
+    "smoke:pack:node-api": "node scripts/smoke-pack-node-api.mjs",
     "test": "npm run build && node test/e2e.mjs",
     "test:bun": "npm run build && bun test/e2e.mjs",
     "typecheck": "tsc --noEmit"
@@ -47,6 +53,19 @@
     "native"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "optionalDependencies": {
+    "git-patch-native-darwin-arm64": "0.1.0",
+    "git-patch-native-darwin-x64": "0.1.0",
+    "git-patch-native-linux-arm64-gnu": "0.1.0",
+    "git-patch-native-linux-arm64-musl": "0.1.0",
+    "git-patch-native-linux-x64-gnu": "0.1.0",
+    "git-patch-native-linux-x64-musl": "0.1.0",
+    "git-patch-native-win32-arm64": "0.1.0",
+    "git-patch-native-win32-x64": "0.1.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.0.0"

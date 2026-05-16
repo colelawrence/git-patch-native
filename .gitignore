@@ -2,6 +2,11 @@
 /node_modules/
 /dist/
 /bin/
+/npm/*/*.node
+/npm/*/*.dylib
+/npm/*/*.so
+/npm/*/*.dll
+*.tgz
 *.local
 *.local/
 *.log

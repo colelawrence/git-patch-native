@@ -1,0 +1,25 @@
+{
+  "name": "git-patch-native-darwin-x64",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Native binaries for git-patch-native on darwin/x64.",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "type": "module",
+  "files": [
+    "git_patch_native.darwin-x64.node",
+    "git_patch_ffi.darwin-x64.dylib"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colelawrence/git-patch-native.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

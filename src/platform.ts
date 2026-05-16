@@ -19,6 +19,21 @@ export function getNativeFilename(): string {
   return `git_patch_native.${npmPlatformTag()}.node`;
 }
 
+export function getFfiFilename(): string {
+  return `git_patch_ffi.${npmPlatformTag()}.${getFfiExtension()}`;
+}
+
+function getFfiExtension(): "dylib" | "so" | "dll" {
+  switch (process.platform) {
+    case "darwin":
+      return "dylib";
+    case "win32":
+      return "dll";
+    default:
+      return "so";
+  }
+}
+
 function normalizeOs(platform: NodeJS.Platform): string {
   switch (platform) {
     case "darwin":

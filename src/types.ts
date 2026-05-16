@@ -3,6 +3,15 @@ export type Path = string;
 
 export type FileContent = string;
 
+export type GitFileMode = "100644" | "100755";
+
+export interface FileModeChange {
+  /** Existing mode for deletes, chmods, and rename/chmod combinations. */
+  before?: GitFileMode | null;
+  /** Resulting mode for adds, chmods, and rename/chmod combinations. */
+  after?: GitFileMode | null;
+}
+
 export interface RenameDetail {
   from: Path;
   /** Git-style similarity percentage. Defaults to 100 when omitted. */
@@ -16,8 +25,8 @@ export interface FileChange {
   after?: FileContent | null;
   /** Previous path when the record key is the new path. */
   moved?: Path | RenameDetail;
-  /** File mode header for adds/deletes. Defaults to 100644. */
-  mode?: string;
+  /** File mode metadata. Scalar shorthand is only valid for additions/deletions. */
+  mode?: GitFileMode | FileModeChange;
 }
 
 export type Changes = Record<Path, FileChange>;

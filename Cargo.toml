@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/git-patch-core",
+  "crates/git-patch-ffi",
   "crates/git-patch-napi",
 ]
 resolver = "2"

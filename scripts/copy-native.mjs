@@ -1,48 +1,28 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { currentPlatform, nativeFfiFilename, nativeNodeFilename, sourceLibraryFilename } from "./platform-info.mjs";
 
 const profile = process.argv[2] === "debug" ? "debug" : "release";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const source = join(root, "target", profile, nativeLibraryFilename());
-const destination = join(root, "bin", nativeNodeFilename());
+const platform = currentPlatform();
+const targetDir = process.env.CARGO_BUILD_TARGET
+  ? join(root, "target", process.env.CARGO_BUILD_TARGET, profile)
+  : join(root, "target", profile);
+const binDir = join(root, "bin");
 
-if (!existsSync(source)) {
-  throw new Error(`Native library not found at ${source}`);
-}
+copyNativeArtifact(sourceLibraryFilename("git_patch_native", platform), nativeNodeFilename(platform));
+copyNativeArtifact(sourceLibraryFilename("git_patch_ffi", platform), nativeFfiFilename(platform));
 
-mkdirSync(dirname(destination), { recursive: true });
-copyFileSync(source, destination);
-console.log(`Copied ${source} -> ${destination}`);
+function copyNativeArtifact(sourceName, destinationName) {
+  const source = join(targetDir, sourceName);
+  const destination = join(binDir, destinationName);
 
-function nativeLibraryFilename() {
-  if (process.platform === "win32") return "git_patch_native.dll";
-  if (process.platform === "darwin") return "libgit_patch_native.dylib";
-  return "libgit_patch_native.so";
-}
-
-function nativeNodeFilename() {
-  return `git_patch_native.${platformTag()}.node`;
-}
-
-function platformTag() {
-  if (process.platform === "darwin") {
-    return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64";
+  if (!existsSync(source)) {
+    throw new Error(`Native library not found at ${source}`);
   }
-  if (process.platform === "win32") {
-    return process.arch === "arm64" ? "win32-arm64" : "win32-x64";
-  }
-  if (process.platform === "linux") {
-    const arch = process.arch === "arm64" ? "arm64" : "x64";
-    return `linux-${arch}-${isMusl() ? "musl" : "gnu"}`;
-  }
-  throw new Error(`Unsupported platform: ${process.platform}`);
-}
 
-function isMusl() {
-  try {
-    return process.report?.getReport?.().header?.glibcVersionRuntime === undefined;
-  } catch {
-    return false;
-  }
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+  console.log(`Copied ${source} -> ${destination}`);
 }

@@ -1,0 +1,28 @@
+{
+  "name": "git-patch-native-linux-x64-musl",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Native binaries for git-patch-native on linux/x64/musl.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "type": "module",
+  "files": [
+    "git_patch_native.linux-x64-musl.node",
+    "git_patch_ffi.linux-x64-musl.so"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colelawrence/git-patch-native.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "libc": [
+    "musl"
+  ]
+}

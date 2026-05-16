@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run sync:package-versions
+      - name: Ensure generated package versions are committed
+        run: git diff --exit-code -- package.json npm package-lock.json
+      - id: version
+        name: Verify tag matches package version
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package version ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test
+      - run: npm run typecheck
+
+  publish-platform:
+    name: Publish ${{ matrix.tag }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: darwin-arm64
+            runner: macos-14
+            rust-target: aarch64-apple-darwin
+            package: git-patch-native-darwin-arm64
+            runtime-smoke: true
+          - tag: darwin-x64
+            runner: macos-13
+            rust-target: x86_64-apple-darwin
+            package: git-patch-native-darwin-x64
+            runtime-smoke: true
+          - tag: linux-x64-gnu
+            runner: ubuntu-24.04
+            rust-target: x86_64-unknown-linux-gnu
+            package: git-patch-native-linux-x64-gnu
+            runtime-smoke: true
+          - tag: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            rust-target: aarch64-unknown-linux-gnu
+            package: git-patch-native-linux-arm64-gnu
+            runtime-smoke: true
+          - tag: linux-x64-musl
+            runner: ubuntu-24.04
+            rust-target: x86_64-unknown-linux-musl
+            package: git-patch-native-linux-x64-musl
+            apt: musl-tools
+            runtime-smoke: false
+          - tag: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            rust-target: aarch64-unknown-linux-musl
+            package: git-patch-native-linux-arm64-musl
+            apt: musl-tools
+            runtime-smoke: false
+          - tag: win32-x64
+            runner: windows-2022
+            rust-target: x86_64-pc-windows-msvc
+            package: git-patch-native-win32-x64
+            runtime-smoke: true
+          - tag: win32-arm64
+            runner: windows-11-arm
+            rust-target: aarch64-pc-windows-msvc
+            package: git-patch-native-win32-arm64
+            runtime-smoke: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+      - name: Install platform build dependencies
+        if: ${{ matrix.apt }}
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - run: npm ci
+      - name: Build native artifacts
+        shell: bash
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.rust-target }}
+          GIT_PATCH_PLATFORM_TAG: ${{ matrix.tag }}
+        run: |
+          cargo build --release -p git-patch-napi -p git-patch-ffi --target "${CARGO_BUILD_TARGET}"
+          node scripts/copy-native.mjs release
+          node scripts/stage-platform-package.mjs
+      - name: Pack platform package
+        shell: bash
+        run: npm pack "npm/${{ matrix.package }}" --pack-destination "${RUNNER_TEMP}" --json
+      - name: Runtime smoke packed Node-API and Bun FFI loading
+        if: ${{ matrix.runtime-smoke }}
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.rust-target }}
+          GIT_PATCH_PLATFORM_TAG: ${{ matrix.tag }}
+        run: npm run smoke:pack
+      - name: Publish platform package with provenance
+        working-directory: npm/${{ matrix.package }}
+        run: npm publish --provenance --access public
+
+  publish-main:
+    name: Publish main package
+    needs: [verify, publish-platform]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run sync:package-versions
+      - run: npm run build
+      - name: Confirm main package excludes native binaries
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e "const p=require('./pack.json')[0]; if (p.files.some(f => f.path.startsWith('bin/'))) throw new Error('main package must not include bin/ artifacts')"
+      - name: Publish main package with provenance
+        run: npm publish --provenance --access public

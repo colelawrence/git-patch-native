@@ -37,7 +37,55 @@ pub struct FileChange {
     #[serde(default)]
     pub moved: Option<Moved>,
     #[serde(default)]
-    pub mode: Option<String>,
+    pub mode: Option<ModeInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ModeInput {
+    Shorthand(String),
+    Change {
+        before: Option<String>,
+        after: Option<String>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileMode {
+    Regular,
+    Executable,
+}
+
+impl FileMode {
+    fn parse(path: &str, value: &str) -> Result<Self, PatchError> {
+        match value {
+            "100644" => Ok(Self::Regular),
+            "100755" => Ok(Self::Executable),
+            _ => invalid(path, "mode must be 100644 or 100755"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Regular => "100644",
+            Self::Executable => "100755",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ModeTransition {
+    before: Option<FileMode>,
+    after: Option<FileMode>,
+}
+
+impl ModeTransition {
+    fn changed(self) -> Option<(FileMode, FileMode)> {
+        match (self.before, self.after) {
+            (Some(before), Some(after)) if before != after => Some((before, after)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,15 +189,7 @@ fn validate_change(path: &str, change: &FileChange) -> Result<(), PatchError> {
         );
     }
 
-    if let Some(mode) = change.mode.as_deref() {
-        validate_mode(path, mode)?;
-        if before.is_some() && after.is_some() {
-            return invalid(
-                path,
-                "mode is only supported for file additions and deletions; oldMode/newMode are needed for mode changes",
-            );
-        }
-    }
+    resolve_mode_transition(path, change)?;
 
     if let Some(moved) = change.moved.as_ref() {
         normalize_and_validate_path(path, moved.source_path())?;
@@ -167,11 +207,84 @@ fn validate_change(path: &str, change: &FileChange) -> Result<(), PatchError> {
     Ok(())
 }
 
-fn validate_mode(path: &str, mode: &str) -> Result<(), PatchError> {
-    match mode {
-        "100644" | "100755" => Ok(()),
-        _ => invalid(path, "mode must be 100644 or 100755"),
+fn resolve_mode_transition(path: &str, change: &FileChange) -> Result<ModeTransition, PatchError> {
+    let is_add = change.before.is_none() && change.after.is_some();
+    let is_delete = change.before.is_some() && change.after.is_none();
+    let is_existing = change.before.is_some() && change.after.is_some();
+
+    match change.mode.as_ref() {
+        None => Ok(ModeTransition::default()),
+        Some(ModeInput::Shorthand(mode)) => {
+            let mode = FileMode::parse(path, mode)?;
+            if is_add {
+                Ok(ModeTransition {
+                    before: None,
+                    after: Some(mode),
+                })
+            } else if is_delete {
+                Ok(ModeTransition {
+                    before: Some(mode),
+                    after: None,
+                })
+            } else {
+                invalid(
+                    path,
+                    "scalar mode is only supported for additions and deletions; use mode.before and mode.after for mode changes",
+                )
+            }
+        }
+        Some(ModeInput::Change { before, after }) => {
+            let before_mode = parse_optional_mode(path, before.as_deref())?;
+            let after_mode = parse_optional_mode(path, after.as_deref())?;
+
+            if is_add {
+                if before_mode.is_some() {
+                    return invalid(path, "mode.before is not valid for file additions");
+                }
+                if after_mode.is_none() {
+                    return invalid(
+                        path,
+                        "mode.after is required when mode is provided for additions",
+                    );
+                }
+                Ok(ModeTransition {
+                    before: None,
+                    after: after_mode,
+                })
+            } else if is_delete {
+                if after_mode.is_some() {
+                    return invalid(path, "mode.after is not valid for file deletions");
+                }
+                if before_mode.is_none() {
+                    return invalid(
+                        path,
+                        "mode.before is required when mode is provided for deletions",
+                    );
+                }
+                Ok(ModeTransition {
+                    before: before_mode,
+                    after: None,
+                })
+            } else if is_existing {
+                match (before_mode, after_mode) {
+                    (Some(before), Some(after)) => Ok(ModeTransition {
+                        before: Some(before),
+                        after: Some(after),
+                    }),
+                    _ => invalid(
+                        path,
+                        "mode changes for existing files require both mode.before and mode.after",
+                    ),
+                }
+            } else {
+                invalid(path, "at least one of before or after is required")
+            }
+        }
     }
+}
+
+fn parse_optional_mode(path: &str, mode: Option<&str>) -> Result<Option<FileMode>, PatchError> {
+    mode.map(|mode| FileMode::parse(path, mode)).transpose()
 }
 
 fn invalid<T>(path: &str, message: &str) -> Result<T, PatchError> {
@@ -190,7 +303,9 @@ fn emit_file_patch(
     let before = change.before.as_deref();
     let after = change.after.as_deref();
 
-    if before == after && change.moved.is_none() {
+    let mode = resolve_mode_transition(path, change)?;
+
+    if before == after && change.moved.is_none() && mode.changed().is_none() {
         return Ok(());
     }
 
@@ -199,7 +314,6 @@ fn emit_file_patch(
         None => path.to_owned(),
     };
     let new_path = path;
-    let mode = change.mode.as_deref().unwrap_or("100644");
 
     out.push_str("diff --git ");
     out.push_str(&patch_path(Some("a"), &old_path));
@@ -210,22 +324,31 @@ fn emit_file_patch(
     match (before, after, change.moved.as_ref()) {
         (None, Some(_), _) => {
             out.push_str("new file mode ");
-            out.push_str(mode);
+            out.push_str(mode.after.unwrap_or(FileMode::Regular).as_str());
             out.push('\n');
         }
         (Some(_), None, _) => {
             out.push_str("deleted file mode ");
-            out.push_str(mode);
+            out.push_str(mode.before.unwrap_or(FileMode::Regular).as_str());
             out.push('\n');
         }
-        (Some(_), Some(_), Some(moved)) => {
-            out.push_str("similarity index ");
-            out.push_str(&moved.similarity().unwrap_or(100).to_string());
-            out.push_str("%\nrename from ");
-            out.push_str(&patch_path(None, &old_path));
-            out.push_str("\nrename to ");
-            out.push_str(&patch_path(None, new_path));
-            out.push('\n');
+        (Some(_), Some(_), moved) => {
+            if let Some((before_mode, after_mode)) = mode.changed() {
+                out.push_str("old mode ");
+                out.push_str(before_mode.as_str());
+                out.push_str("\nnew mode ");
+                out.push_str(after_mode.as_str());
+                out.push('\n');
+            }
+            if let Some(moved) = moved {
+                out.push_str("similarity index ");
+                out.push_str(&moved.similarity().unwrap_or(100).to_string());
+                out.push_str("%\nrename from ");
+                out.push_str(&patch_path(None, &old_path));
+                out.push_str("\nrename to ");
+                out.push_str(&patch_path(None, new_path));
+                out.push('\n');
+            }
         }
         _ => {}
     }
@@ -446,6 +569,35 @@ mod tests {
         assert!(output.contains("diff --git \"a/bell\\007file.txt\" \"b/bell\\007file.txt\"\n"));
         assert!(
             output.contains("rename from \"old\\tname.txt\"\nrename to \"newline\\nfile.txt\"\n")
+        );
+    }
+
+    #[test]
+    fn emits_existing_file_mode_changes() {
+        let chmod_only = patch(
+            r#"{
+              "changes": {
+                "script.sh": { "before": "echo hi\n", "after": "echo hi\n", "mode": { "before": "100644", "after": "100755" } }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            chmod_only,
+            "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n"
+        );
+
+        let edit_and_chmod = patch(
+            r#"{
+              "changes": {
+                "script.sh": { "before": "echo hi\n", "after": "echo bye\n", "mode": { "before": "100644", "after": "100755" } }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            edit_and_chmod
+                .contains("old mode 100644\nnew mode 100755\n--- a/script.sh\n+++ b/script.sh\n")
         );
     }
 

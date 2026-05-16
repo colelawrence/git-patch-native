@@ -1,0 +1,25 @@
+{
+  "name": "git-patch-native-win32-x64",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Native binaries for git-patch-native on win32/x64.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "type": "module",
+  "files": [
+    "git_patch_native.win32-x64.node",
+    "git_patch_ffi.win32-x64.dll"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/colelawrence/git-patch-native.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
