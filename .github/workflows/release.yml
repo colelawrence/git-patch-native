@@ -86,7 +86,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm install -g npm@^11.10.0
       - uses: oven-sh/setup-bun@v2
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -121,7 +120,7 @@ jobs:
           if npm view "${{ matrix.package }}@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
             echo "${{ matrix.package }}@${{ needs.verify.outputs.version }} already published"
           else
-            npm publish --provenance --access public
+            npx --yes npm@^11.10.0 publish --provenance --access public
           fi
 
   publish-main:
@@ -134,7 +133,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm install -g npm@^11.10.0
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run sync:package-versions
@@ -148,5 +146,5 @@ jobs:
           if npm view "git-patch-native@${{ needs.verify.outputs.version }}" version >/dev/null 2>&1; then
             echo "git-patch-native@${{ needs.verify.outputs.version }} already published"
           else
-            npm publish --ignore-scripts --provenance --access public
+            npx --yes npm@^11.10.0 publish --ignore-scripts --provenance --access public
           fi
