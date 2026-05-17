@@ -26,12 +26,17 @@ execFileSync(npm, ["install", "--ignore-scripts", platformPack, rootPack], {
 
 const smoke = `
   import assert from "node:assert/strict";
-  import { generatePatch, nativeBindingExists } from "git-patch-native";
+  import { applyPatch, generatePatch, inspectPatch, nativeBindingExists } from "git-patch-native";
 
   assert.equal(nativeBindingExists(), true);
   const patch = generatePatch({ "a.txt": { before: "one\\n", after: "two\\n" } });
   assert.match(patch, /diff --git a\\/a\\.txt b\\/a\\.txt/);
   assert.match(patch, /-one\\n\\+two/);
+  const summary = inspectPatch(patch);
+  assert.equal(summary.files[0]._tag, "Modified");
+  const applied = applyPatch({ "a.txt": "one\\n" }, patch);
+  assert.equal(applied._tag, "Applied");
+  assert.equal(applied.files["a.txt"].content, "two\\n");
   console.log("node-api package smoke ok");
 `;
 writeFileSync(join(consumerDir, "smoke.mjs"), smoke);

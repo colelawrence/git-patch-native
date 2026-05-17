@@ -36,6 +36,18 @@ type Changes = Record<string, {
 }>;
 ```
 
+`inspectPatch(patch)` parses a text patch into file-level operations and rejects. `applyPatch(files, patch)` applies a text patch to an in-memory snapshot and returns either the next snapshot or retryable rejects.
+
+```ts
+type FileSnapshot = Record<string, string | { content: string; mode?: GitFileMode }>;
+
+type ApplyPatchResult =
+  | { _tag: "Applied"; files: Record<string, { content: string; mode?: GitFileMode }>; changes: AppliedPatchChange[] }
+  | { _tag: "Rejected"; files: Record<string, { content: string; mode?: GitFileMode }>; rejects: PatchReject[] };
+```
+
+Apply is atomic by default: if any file patch fails, the returned `files` snapshot is the original input and `rejects[*].patch` contains a patchlet that can be resolved and submitted again against a newer snapshot.
+
 Guarantees for the initial contract:
 
 - deterministic path ordering
@@ -47,7 +59,8 @@ Guarantees for the initial contract:
 - final-newline markers when needed
 - `contextLines >= 1` so output applies with default `git apply`
 - text-only input: NUL-containing content is rejected
-- all diff formatting owned by Rust core; JS only serializes inputs and loads the native binding
+- all diff formatting and patch application semantics owned by Rust core; JS only serializes inputs and loads the native binding
+- in-memory patch application for text add/modify/delete/rename patches, with structured rejects on failure
 
 ## Development
 

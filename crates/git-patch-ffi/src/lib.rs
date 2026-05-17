@@ -20,6 +20,42 @@ pub unsafe extern "C" fn git_patch_generate_patch_json_result(
     })
 }
 
+/// Apply a UTF-8 patch request JSON string and return a JSON result envelope.
+///
+/// # Safety
+/// `input_json` must be null or point to a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn git_patch_apply_patch_json_result(
+    input_json: *const c_char,
+) -> *mut c_char {
+    let result = read_input(input_json).and_then(|input| {
+        git_patch_core::apply_patch_from_json(input).map_err(|error| error.to_string())
+    });
+
+    into_c_string(match result {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+    })
+}
+
+/// Inspect a UTF-8 patch request JSON string and return a JSON result envelope.
+///
+/// # Safety
+/// `input_json` must be null or point to a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn git_patch_inspect_patch_json_result(
+    input_json: *const c_char,
+) -> *mut c_char {
+    let result = read_input(input_json).and_then(|input| {
+        git_patch_core::inspect_patch_from_json(input).map_err(|error| error.to_string())
+    });
+
+    into_c_string(match result {
+        Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+        Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+    })
+}
+
 /// Free a string returned by this library.
 ///
 /// # Safety

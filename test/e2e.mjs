@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { generatePatch, nativeBindingExists } from "../dist/src/index.js";
+import { applyPatch, generatePatch, inspectPatch, nativeBindingExists } from "../dist/src/index.js";
 
 assert.equal(nativeBindingExists(), true);
 
@@ -395,6 +395,87 @@ for (const scenario of scenarios) {
 
 for (const scenario of generatedTextEditScenarios()) {
   assertGitApplies(scenario);
+}
+
+{
+  const patch = generatePatch({
+    "modified.txt": { before: "one\n", after: "two\n" },
+    "added.txt": { after: "new\n" },
+    "deleted.txt": { before: "old\n" },
+    "renamed.txt": { before: "same\n", after: "same\n", moved: "old-name.txt" },
+  });
+  const summary = inspectPatch(patch);
+  assert.deepEqual(summary.rejects, []);
+  assert.deepEqual(summary.files.map((file) => file._tag), ["Added", "Deleted", "Modified", "Renamed"]);
+
+  const result = applyPatch(
+    {
+      "modified.txt": "one\n",
+      "deleted.txt": "old\n",
+      "old-name.txt": "same\n",
+    },
+    patch,
+  );
+
+  assert.equal(result._tag, "Applied");
+  assert.equal(result.files["modified.txt"].content, "two\n");
+  assert.equal(result.files["added.txt"].content, "new\n");
+  assert.equal(result.files["deleted.txt"], undefined);
+  assert.equal(result.files["old-name.txt"], undefined);
+  assert.equal(result.files["renamed.txt"].content, "same\n");
+  assert.equal(result.changes.length, 4);
+}
+
+{
+  const patch = generatePatch({ "a.txt": { before: "one\n", after: "two\n" } });
+  const result = applyPatch({ "a.txt": "changed\n" }, patch);
+
+  assert.equal(result._tag, "Rejected");
+  assert.equal(result.files["a.txt"].content, "changed\n");
+  assert.equal(result.rejects.length, 1);
+  assert.equal(result.rejects[0]._tag, "ContentMismatch");
+  assert.match(result.rejects[0].patch, /diff --git a\/a\.txt b\/a\.txt/);
+
+  const replay = applyPatch({ "a.txt": "one\n" }, result.rejects[0].patch);
+  assert.equal(replay._tag, "Applied");
+  assert.equal(replay.files["a.txt"].content, "two\n");
+}
+
+{
+  const patch = generatePatch({
+    "a-success.txt": { before: "one\n", after: "two\n" },
+    "z-fail.txt": { before: "old\n", after: "new\n" },
+  });
+  const result = applyPatch({ "a-success.txt": "one\n", "z-fail.txt": "stale\n" }, patch);
+
+  assert.equal(result._tag, "Rejected");
+  assert.deepEqual(result.files, {
+    "a-success.txt": { content: "one\n" },
+    "z-fail.txt": { content: "stale\n" },
+  });
+}
+
+{
+  const create = generatePatch({ "sequence.txt": { after: "one\n" } });
+  const modify = generatePatch({ "sequence.txt": { before: "one\n", after: "two\n" } });
+  const result = applyPatch({}, `${create}${modify}`);
+
+  assert.equal(result._tag, "Applied");
+  assert.equal(result.files["sequence.txt"].content, "two\n");
+  assert.equal(result.changes.length, 2);
+}
+
+{
+  const valid = generatePatch({ "safe.txt": { before: "one\n", after: "two\n" } });
+  const hostile = "diff --git a/../evil.txt b/../evil.txt\n--- a/../evil.txt\n+++ b/../evil.txt\n@@ -1 +1 @@\n-old\n+new\n";
+  const patch = `${valid}${hostile}`;
+  const summary = inspectPatch(patch);
+  const result = applyPatch({ "safe.txt": "one\n" }, patch);
+
+  assert.equal(summary.rejects[0]._tag, "Unsupported");
+  assert.equal(result._tag, "Rejected");
+  assert.deepEqual(result.files, { "safe.txt": { content: "one\n" } });
+  assert.equal(result.rejects[0]._tag, "Unsupported");
 }
 
 for (const [name, before, after] of [

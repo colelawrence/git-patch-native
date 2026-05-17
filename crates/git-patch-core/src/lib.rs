@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use diffy::patch_set::{FileMode as DiffyFileMode, FileOperation, ParseOptions, PatchSet};
+use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -11,6 +12,8 @@ pub enum PatchError {
     InvalidChange { path: String, message: String },
     #[error("invalid patch option {name}: {message}")]
     InvalidOption { name: String, message: String },
+    #[error("invalid apply patch request JSON: {0}")]
+    InvalidApplyJson(#[source] serde_json::Error),
     #[error("duplicate normalized path {normalized:?} from {first:?} and {second:?}")]
     DuplicatePath {
         normalized: String,
@@ -129,6 +132,118 @@ impl Default for PatchOptions {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyPatchRequest {
+    pub files: BTreeMap<String, FileSnapshotInput>,
+    pub patch: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectPatchRequest {
+    pub patch: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum FileSnapshotInput {
+    Content(String),
+    Entry(FileSnapshotEntry),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSnapshotEntry {
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "_tag")]
+pub enum ApplyPatchResult {
+    Applied {
+        files: BTreeMap<String, FileSnapshotEntry>,
+        changes: Vec<AppliedChange>,
+    },
+    Rejected {
+        files: BTreeMap<String, FileSnapshotEntry>,
+        rejects: Vec<PatchReject>,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "_tag")]
+pub enum AppliedChange {
+    Added {
+        path: String,
+        after: FileSnapshotEntry,
+    },
+    Modified {
+        path: String,
+        before: FileSnapshotEntry,
+        after: FileSnapshotEntry,
+    },
+    Deleted {
+        path: String,
+        before: FileSnapshotEntry,
+    },
+    Renamed {
+        from: String,
+        to: String,
+        before: FileSnapshotEntry,
+        after: FileSnapshotEntry,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "_tag")]
+pub struct PatchSummary {
+    pub files: Vec<PatchFileSummary>,
+    pub rejects: Vec<PatchReject>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "_tag")]
+pub enum PatchFileSummary {
+    Added { path: String },
+    Modified { path: String },
+    Deleted { path: String },
+    Renamed { from: String, to: String },
+    Copied { from: String, to: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "_tag")]
+pub enum PatchReject {
+    MissingFile {
+        path: String,
+        operation: String,
+        patch: String,
+        message: String,
+    },
+    AlreadyExists {
+        path: String,
+        operation: String,
+        patch: String,
+        message: String,
+    },
+    ContentMismatch {
+        path: String,
+        operation: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hunk: Option<usize>,
+        patch: String,
+        message: String,
+    },
+    Unsupported {
+        operation: String,
+        patch: String,
+        message: String,
+    },
+}
+
 fn default_context_lines() -> usize {
     3
 }
@@ -136,6 +251,18 @@ fn default_context_lines() -> usize {
 pub fn generate_patch_from_json(input: &str) -> Result<String, PatchError> {
     let request: PatchRequest = serde_json::from_str(input)?;
     generate_patch(&request)
+}
+
+pub fn apply_patch_from_json(input: &str) -> Result<String, PatchError> {
+    let request: ApplyPatchRequest =
+        serde_json::from_str(input).map_err(PatchError::InvalidApplyJson)?;
+    serde_json::to_string(&apply_patch(&request)?).map_err(PatchError::InvalidJson)
+}
+
+pub fn inspect_patch_from_json(input: &str) -> Result<String, PatchError> {
+    let request: InspectPatchRequest =
+        serde_json::from_str(input).map_err(PatchError::InvalidApplyJson)?;
+    serde_json::to_string(&inspect_patch(&request)).map_err(PatchError::InvalidJson)
 }
 
 pub fn generate_patch(request: &PatchRequest) -> Result<String, PatchError> {
@@ -160,6 +287,569 @@ pub fn generate_patch(request: &PatchRequest) -> Result<String, PatchError> {
         emit_file_patch(&normalized_path, change, &request.options, &mut out)?;
     }
     Ok(out)
+}
+
+pub fn inspect_patch(request: &InspectPatchRequest) -> PatchSummary {
+    let mut files = Vec::new();
+    let mut rejects = Vec::new();
+
+    if request.patch.contains('\0') {
+        rejects.push(PatchReject::Unsupported {
+            operation: "Parse".to_owned(),
+            patch: request.patch.clone(),
+            message: "NUL bytes are not supported; this API parses text patches only".to_owned(),
+        });
+        return PatchSummary { files, rejects };
+    }
+
+    for file_patch in PatchSet::parse(&request.patch, ParseOptions::gitdiff()) {
+        let file_patch = match file_patch {
+            Ok(file_patch) => file_patch,
+            Err(error) => {
+                rejects.push(PatchReject::Unsupported {
+                    operation: "Parse".to_owned(),
+                    patch: request.patch.clone(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+
+        let operation = file_patch.operation().strip_prefix(1);
+        match &operation {
+            FileOperation::Create(path) => {
+                let patch =
+                    operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode());
+                if let Some(path) =
+                    normalize_patch_path_or_reject(path.as_ref(), "Create", &patch, &mut rejects)
+                {
+                    files.push(PatchFileSummary::Added { path });
+                }
+            }
+            FileOperation::Delete(path) => {
+                let patch =
+                    operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode());
+                if let Some(path) =
+                    normalize_patch_path_or_reject(path.as_ref(), "Delete", &patch, &mut rejects)
+                {
+                    files.push(PatchFileSummary::Deleted { path });
+                }
+            }
+            FileOperation::Modify { original, modified } => {
+                let patch =
+                    operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode());
+                let Some(original) = normalize_patch_path_or_reject(
+                    original.as_ref(),
+                    "Modify",
+                    &patch,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                let Some(modified) = normalize_patch_path_or_reject(
+                    modified.as_ref(),
+                    "Modify",
+                    &patch,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                if original == modified {
+                    files.push(PatchFileSummary::Modified { path: original });
+                } else {
+                    files.push(PatchFileSummary::Renamed {
+                        from: original,
+                        to: modified,
+                    });
+                }
+            }
+            FileOperation::Rename { from, to } => {
+                let patch =
+                    operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode());
+                let Some(from) =
+                    normalize_patch_path_or_reject(from.as_ref(), "Rename", &patch, &mut rejects)
+                else {
+                    continue;
+                };
+                let Some(to) =
+                    normalize_patch_path_or_reject(to.as_ref(), "Rename", &patch, &mut rejects)
+                else {
+                    continue;
+                };
+                files.push(PatchFileSummary::Renamed { from, to });
+            }
+            FileOperation::Copy { from, to } => {
+                let patch =
+                    operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode());
+                if normalize_patch_path_or_reject(from.as_ref(), "Copy", &patch, &mut rejects)
+                    .is_some()
+                    && normalize_patch_path_or_reject(to.as_ref(), "Copy", &patch, &mut rejects)
+                        .is_some()
+                {
+                    rejects.push(PatchReject::Unsupported {
+                        operation: "Copy".to_owned(),
+                        patch,
+                        message: "copy patches are not supported".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    PatchSummary { files, rejects }
+}
+
+pub fn apply_patch(request: &ApplyPatchRequest) -> Result<ApplyPatchResult, PatchError> {
+    let files = normalize_snapshot(&request.files)?;
+    let mut next_files = files.clone();
+    let mut changes = Vec::new();
+    let mut rejects = Vec::new();
+
+    if request.patch.contains('\0') {
+        return Ok(ApplyPatchResult::Rejected {
+            files,
+            rejects: vec![PatchReject::Unsupported {
+                operation: "Parse".to_owned(),
+                patch: request.patch.clone(),
+                message: "NUL bytes are not supported; this API applies text patches only"
+                    .to_owned(),
+            }],
+        });
+    }
+
+    let parsed = PatchSet::parse(&request.patch, ParseOptions::gitdiff());
+    for file_patch in parsed {
+        let file_patch = match file_patch {
+            Ok(file_patch) => file_patch,
+            Err(error) => {
+                rejects.push(PatchReject::Unsupported {
+                    operation: "Parse".to_owned(),
+                    patch: request.patch.clone(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+
+        if file_patch.patch().is_binary() {
+            rejects.push(PatchReject::Unsupported {
+                operation: operation_name(file_patch.operation()),
+                patch: request.patch.clone(),
+                message: "binary patches are not supported".to_owned(),
+            });
+            continue;
+        }
+
+        let operation = file_patch.operation().strip_prefix(1);
+        let Some(text_patch) = file_patch.patch().as_text() else {
+            rejects.push(PatchReject::Unsupported {
+                operation: operation_name(&operation),
+                patch: operation_patchlet(&operation, file_patch.old_mode(), file_patch.new_mode()),
+                message: "patch entry does not contain a text patch".to_owned(),
+            });
+            continue;
+        };
+        let patch_text = text_patchlet(
+            &operation,
+            text_patch,
+            file_patch.old_mode(),
+            file_patch.new_mode(),
+        );
+        match operation {
+            FileOperation::Create(path) => {
+                let Some(path) = normalize_patch_path_or_reject(
+                    path.as_ref(),
+                    "Create",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                if next_files.contains_key(&path) {
+                    rejects.push(PatchReject::AlreadyExists {
+                        path,
+                        operation: "Create".to_owned(),
+                        patch: patch_text,
+                        message: "target file already exists".to_owned(),
+                    });
+                    continue;
+                }
+                match diffy::apply("", text_patch) {
+                    Ok(content) => {
+                        let after = FileSnapshotEntry {
+                            content,
+                            mode: mode_to_string(file_patch.new_mode())
+                                .or(Some("100644".to_owned())),
+                        };
+                        next_files.insert(path.clone(), after.clone());
+                        changes.push(AppliedChange::Added { path, after });
+                    }
+                    Err(error) => rejects.push(content_mismatch(
+                        path,
+                        "Create",
+                        None,
+                        patch_text,
+                        error.to_string(),
+                    )),
+                }
+            }
+            FileOperation::Delete(path) => {
+                let Some(path) = normalize_patch_path_or_reject(
+                    path.as_ref(),
+                    "Delete",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                let Some(before) = next_files.get(&path).cloned() else {
+                    rejects.push(PatchReject::MissingFile {
+                        path,
+                        operation: "Delete".to_owned(),
+                        patch: patch_text,
+                        message: "source file is missing".to_owned(),
+                    });
+                    continue;
+                };
+                match diffy::apply(&before.content, text_patch) {
+                    Ok(content) if content.is_empty() => {
+                        next_files.remove(&path);
+                        changes.push(AppliedChange::Deleted { path, before });
+                    }
+                    Ok(_) => rejects.push(content_mismatch(
+                        path,
+                        "Delete",
+                        None,
+                        patch_text,
+                        "delete patch did not produce empty content".to_owned(),
+                    )),
+                    Err(error) => rejects.push(content_mismatch(
+                        path,
+                        "Delete",
+                        None,
+                        patch_text,
+                        error.to_string(),
+                    )),
+                }
+            }
+            FileOperation::Modify { original, modified } => {
+                let Some(original) = normalize_patch_path_or_reject(
+                    original.as_ref(),
+                    "Modify",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                let Some(modified) = normalize_patch_path_or_reject(
+                    modified.as_ref(),
+                    "Modify",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                apply_modify_or_rename(
+                    &mut next_files,
+                    &mut changes,
+                    &mut rejects,
+                    ApplyFilePatch {
+                        original,
+                        modified,
+                        text_patch,
+                        patch_text: &patch_text,
+                        new_mode: mode_to_string(file_patch.new_mode()),
+                        operation: "Modify",
+                    },
+                );
+            }
+            FileOperation::Rename { from, to } => {
+                let Some(from) = normalize_patch_path_or_reject(
+                    from.as_ref(),
+                    "Rename",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                let Some(to) = normalize_patch_path_or_reject(
+                    to.as_ref(),
+                    "Rename",
+                    &patch_text,
+                    &mut rejects,
+                ) else {
+                    continue;
+                };
+                apply_modify_or_rename(
+                    &mut next_files,
+                    &mut changes,
+                    &mut rejects,
+                    ApplyFilePatch {
+                        original: from,
+                        modified: to,
+                        text_patch,
+                        patch_text: &patch_text,
+                        new_mode: mode_to_string(file_patch.new_mode()),
+                        operation: "Rename",
+                    },
+                );
+            }
+            FileOperation::Copy { .. } => rejects.push(PatchReject::Unsupported {
+                operation: "Copy".to_owned(),
+                patch: patch_text,
+                message: "copy patches are not supported".to_owned(),
+            }),
+        }
+    }
+
+    if rejects.is_empty() {
+        Ok(ApplyPatchResult::Applied {
+            files: next_files,
+            changes,
+        })
+    } else {
+        Ok(ApplyPatchResult::Rejected { files, rejects })
+    }
+}
+
+struct ApplyFilePatch<'a> {
+    original: String,
+    modified: String,
+    text_patch: &'a diffy::Patch<'a, str>,
+    patch_text: &'a str,
+    new_mode: Option<String>,
+    operation: &'static str,
+}
+
+fn apply_modify_or_rename(
+    files: &mut BTreeMap<String, FileSnapshotEntry>,
+    changes: &mut Vec<AppliedChange>,
+    rejects: &mut Vec<PatchReject>,
+    patch: ApplyFilePatch<'_>,
+) {
+    let Some(before) = files.get(&patch.original).cloned() else {
+        rejects.push(PatchReject::MissingFile {
+            path: patch.original,
+            operation: patch.operation.to_owned(),
+            patch: patch.patch_text.to_owned(),
+            message: "source file is missing".to_owned(),
+        });
+        return;
+    };
+
+    if patch.original != patch.modified && files.contains_key(&patch.modified) {
+        rejects.push(PatchReject::AlreadyExists {
+            path: patch.modified,
+            operation: patch.operation.to_owned(),
+            patch: patch.patch_text.to_owned(),
+            message: "target file already exists".to_owned(),
+        });
+        return;
+    }
+
+    match diffy::apply(&before.content, patch.text_patch) {
+        Ok(content) => {
+            let after = FileSnapshotEntry {
+                content,
+                mode: patch.new_mode.or_else(|| before.mode.clone()),
+            };
+            if patch.original == patch.modified {
+                files.insert(patch.modified.clone(), after.clone());
+                changes.push(AppliedChange::Modified {
+                    path: patch.modified,
+                    before,
+                    after,
+                });
+            } else {
+                files.remove(&patch.original);
+                files.insert(patch.modified.clone(), after.clone());
+                changes.push(AppliedChange::Renamed {
+                    from: patch.original,
+                    to: patch.modified,
+                    before,
+                    after,
+                });
+            }
+        }
+        Err(error) => rejects.push(content_mismatch(
+            patch.original,
+            patch.operation,
+            parse_hunk_number(&error.to_string()),
+            patch.patch_text.to_owned(),
+            error.to_string(),
+        )),
+    }
+}
+
+fn normalize_snapshot(
+    files: &BTreeMap<String, FileSnapshotInput>,
+) -> Result<BTreeMap<String, FileSnapshotEntry>, PatchError> {
+    let mut normalized = BTreeMap::new();
+    let mut original_paths = BTreeMap::<String, String>::new();
+
+    for (path, file) in files {
+        let original_path = path.clone();
+        let path = normalize_and_validate_path(path, path)?;
+        let entry = match file {
+            FileSnapshotInput::Content(content) => FileSnapshotEntry {
+                content: content.clone(),
+                mode: None,
+            },
+            FileSnapshotInput::Entry(entry) => entry.clone(),
+        };
+        if entry.content.contains('\0') {
+            return invalid(
+                &path,
+                "NUL bytes are not supported; this API applies text patches only",
+            );
+        }
+        if let Some(mode) = entry.mode.as_deref() {
+            FileMode::parse(&path, mode)?;
+        }
+        if let Some(first) = original_paths.insert(path.clone(), original_path.clone()) {
+            return Err(PatchError::DuplicatePath {
+                normalized: path,
+                first,
+                second: original_path,
+            });
+        }
+        normalized.insert(path, entry);
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_patch_path_or_reject(
+    path: &str,
+    operation: &str,
+    patch: &str,
+    rejects: &mut Vec<PatchReject>,
+) -> Option<String> {
+    match normalize_and_validate_path("patch", path) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            rejects.push(PatchReject::Unsupported {
+                operation: operation.to_owned(),
+                patch: patch.to_owned(),
+                message: error.to_string(),
+            });
+            None
+        }
+    }
+}
+
+fn text_patchlet(
+    operation: &FileOperation<'_, str>,
+    text_patch: &diffy::Patch<'_, str>,
+    old_mode: Option<&DiffyFileMode>,
+    new_mode: Option<&DiffyFileMode>,
+) -> String {
+    let mut out = operation_patchlet(operation, old_mode, new_mode);
+    out.push_str(&text_patch.to_string());
+    out
+}
+
+fn operation_patchlet(
+    operation: &FileOperation<'_, str>,
+    old_mode: Option<&DiffyFileMode>,
+    new_mode: Option<&DiffyFileMode>,
+) -> String {
+    let (old_path, new_path) = match operation {
+        FileOperation::Create(path) => (path.as_ref(), path.as_ref()),
+        FileOperation::Delete(path) => (path.as_ref(), path.as_ref()),
+        FileOperation::Modify { original, modified } => (original.as_ref(), modified.as_ref()),
+        FileOperation::Rename { from, to } | FileOperation::Copy { from, to } => {
+            (from.as_ref(), to.as_ref())
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str("diff --git ");
+    out.push_str(&patch_path(Some("a"), old_path));
+    out.push(' ');
+    out.push_str(&patch_path(Some("b"), new_path));
+    out.push('\n');
+
+    match operation {
+        FileOperation::Create(_) => {
+            out.push_str("new file mode ");
+            out.push_str(mode_to_string(new_mode).as_deref().unwrap_or("100644"));
+            out.push('\n');
+        }
+        FileOperation::Delete(_) => {
+            out.push_str("deleted file mode ");
+            out.push_str(mode_to_string(old_mode).as_deref().unwrap_or("100644"));
+            out.push('\n');
+        }
+        FileOperation::Modify { .. } => {
+            if let (Some(old), Some(new)) = (mode_to_string(old_mode), mode_to_string(new_mode))
+                && old != new
+            {
+                out.push_str("old mode ");
+                out.push_str(&old);
+                out.push_str("\nnew mode ");
+                out.push_str(&new);
+                out.push('\n');
+            }
+        }
+        FileOperation::Rename { from, to } => {
+            out.push_str("similarity index 100%\nrename from ");
+            out.push_str(&patch_path(None, from.as_ref()));
+            out.push_str("\nrename to ");
+            out.push_str(&patch_path(None, to.as_ref()));
+            out.push('\n');
+        }
+        FileOperation::Copy { from, to } => {
+            out.push_str("similarity index 100%\ncopy from ");
+            out.push_str(&patch_path(None, from.as_ref()));
+            out.push_str("\ncopy to ");
+            out.push_str(&patch_path(None, to.as_ref()));
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+fn content_mismatch(
+    path: String,
+    operation: &str,
+    hunk: Option<usize>,
+    patch: String,
+    message: String,
+) -> PatchReject {
+    PatchReject::ContentMismatch {
+        path,
+        operation: operation.to_owned(),
+        hunk,
+        patch,
+        message,
+    }
+}
+
+fn parse_hunk_number(message: &str) -> Option<usize> {
+    message
+        .strip_prefix("error applying hunk #")
+        .and_then(|value| value.parse().ok())
+}
+
+fn mode_to_string(mode: Option<&DiffyFileMode>) -> Option<String> {
+    match mode {
+        Some(DiffyFileMode::Regular) => Some("100644".to_owned()),
+        Some(DiffyFileMode::Executable) => Some("100755".to_owned()),
+        _ => None,
+    }
+}
+
+fn operation_name(operation: &FileOperation<'_, str>) -> String {
+    match operation {
+        FileOperation::Delete(_) => "Delete",
+        FileOperation::Create(_) => "Create",
+        FileOperation::Modify { .. } => "Modify",
+        FileOperation::Rename { .. } => "Rename",
+        FileOperation::Copy { .. } => "Copy",
+    }
+    .to_owned()
 }
 
 fn validate_options(options: &PatchOptions) -> Result<(), PatchError> {
@@ -519,6 +1209,306 @@ mod tests {
 
     fn patch(input: &str) -> Result<String, PatchError> {
         generate_patch_from_json(input)
+    }
+
+    fn apply(input: &str) -> Result<ApplyPatchResult, PatchError> {
+        let output = apply_patch_from_json(input)?;
+        serde_json::from_str(&output).map_err(PatchError::InvalidJson)
+    }
+
+    fn inspect(input: &str) -> Result<PatchSummary, PatchError> {
+        let output = inspect_patch_from_json(input)?;
+        serde_json::from_str(&output).map_err(PatchError::InvalidJson)
+    }
+
+    #[test]
+    fn rejects_mixed_patch_atomically() {
+        let patch = patch(
+            r#"{
+              "changes": {
+                "a-success.txt": { "before": "one\n", "after": "two\n" },
+                "z-fail.txt": { "before": "old\n", "after": "new\n" }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let request = serde_json::json!({
+            "files": {
+                "a-success.txt": "one\n",
+                "z-fail.txt": "stale\n"
+            },
+            "patch": patch,
+        });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Rejected { files, rejects } => {
+                assert_eq!(
+                    files.get("a-success.txt").map(|file| file.content.as_str()),
+                    Some("one\n")
+                );
+                assert_eq!(
+                    files.get("z-fail.txt").map(|file| file.content.as_str()),
+                    Some("stale\n")
+                );
+                assert_eq!(rejects.len(), 1);
+                assert!(matches!(rejects[0], PatchReject::ContentMismatch { .. }));
+            }
+            ApplyPatchResult::Applied { .. } => panic!("expected atomic reject"),
+        }
+    }
+
+    #[test]
+    fn reject_patchlet_replays_against_corrected_snapshot() {
+        let patch = patch(
+            r#"{
+              "changes": {
+                "a.txt": { "before": "one\n", "after": "two\n" }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let stale = serde_json::json!({ "files": { "a.txt": "stale\n" }, "patch": patch });
+        let patchlet = match apply(&stale.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Rejected { rejects, .. } => match &rejects[0] {
+                PatchReject::ContentMismatch { patch, .. } => patch.clone(),
+                reject => panic!("unexpected reject: {reject:?}"),
+            },
+            ApplyPatchResult::Applied { .. } => panic!("expected reject"),
+        };
+
+        let corrected = serde_json::json!({ "files": { "a.txt": "one\n" }, "patch": patchlet });
+        match apply(&corrected.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Applied { files, .. } => {
+                assert_eq!(
+                    files.get("a.txt").map(|file| file.content.as_str()),
+                    Some("two\n")
+                );
+            }
+            ApplyPatchResult::Rejected { rejects, .. } => panic!("unexpected rejects: {rejects:?}"),
+        }
+    }
+
+    #[test]
+    fn applies_patch_entries_sequentially() {
+        let create = patch(r#"{ "changes": { "a.txt": { "after": "one\n" } } }"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let modify =
+            patch(r#"{ "changes": { "a.txt": { "before": "one\n", "after": "two\n" } } }"#)
+                .unwrap_or_else(|error| panic!("{error}"));
+        let request = serde_json::json!({ "files": {}, "patch": format!("{create}{modify}") });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Applied { files, changes } => {
+                assert_eq!(
+                    files.get("a.txt").map(|file| file.content.as_str()),
+                    Some("two\n")
+                );
+                assert_eq!(changes.len(), 2);
+            }
+            ApplyPatchResult::Rejected { rejects, .. } => panic!("unexpected rejects: {rejects:?}"),
+        }
+    }
+
+    #[test]
+    fn unsupported_operation_rejects_atomically() {
+        let modify =
+            patch(r#"{ "changes": { "a.txt": { "before": "one\n", "after": "two\n" } } }"#)
+                .unwrap_or_else(|error| panic!("{error}"));
+        let copy = "diff --git a/source.txt b/copy.txt\nsimilarity index 100%\ncopy from source.txt\ncopy to copy.txt\n";
+        let patch = format!("{modify}{copy}");
+        let summary = inspect(&serde_json::json!({ "patch": patch.clone() }).to_string())
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            summary
+                .files
+                .iter()
+                .all(|file| !matches!(file, PatchFileSummary::Copied { .. }))
+        );
+        assert!(summary.rejects.iter().any(|reject| matches!(reject, PatchReject::Unsupported { operation, .. } if operation == "Copy")));
+
+        let request = serde_json::json!({
+            "files": { "a.txt": "one\n", "source.txt": "same\n" },
+            "patch": patch,
+        });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Rejected { files, rejects } => {
+                assert_eq!(
+                    files.get("a.txt").map(|file| file.content.as_str()),
+                    Some("one\n")
+                );
+                assert_eq!(
+                    files.get("source.txt").map(|file| file.content.as_str()),
+                    Some("same\n")
+                );
+                assert!(rejects.iter().any(|reject| matches!(reject, PatchReject::Unsupported { operation, .. } if operation == "Copy")));
+            }
+            ApplyPatchResult::Applied { .. } => panic!("expected unsupported reject"),
+        }
+    }
+
+    #[test]
+    fn hostile_patch_paths_reject_atomically() {
+        let valid =
+            patch(r#"{ "changes": { "good.txt": { "before": "one\n", "after": "two\n" } } }"#)
+                .unwrap_or_else(|error| panic!("{error}"));
+        let hostile = "diff --git a/../evil.txt b/../evil.txt\n--- a/../evil.txt\n+++ b/../evil.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        let patch = format!("{valid}{hostile}");
+
+        let summary = inspect(&serde_json::json!({ "patch": patch.clone() }).to_string())
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.rejects.len(), 1);
+        assert!(matches!(
+            summary.rejects[0],
+            PatchReject::Unsupported { .. }
+        ));
+
+        let request = serde_json::json!({ "files": { "good.txt": "one\n" }, "patch": patch });
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Rejected { files, rejects } => {
+                assert_eq!(
+                    files.get("good.txt").map(|file| file.content.as_str()),
+                    Some("one\n")
+                );
+                assert_eq!(rejects.len(), 1);
+                assert!(matches!(rejects[0], PatchReject::Unsupported { .. }));
+            }
+            ApplyPatchResult::Applied { .. } => panic!("expected hostile path reject"),
+        }
+    }
+
+    #[test]
+    fn inspect_reports_parse_rejects_without_throwing() {
+        let summary =
+            inspect("{ \"patch\": \"a\\u0000b\" }").unwrap_or_else(|error| panic!("{error}"));
+        assert!(summary.files.is_empty());
+        assert_eq!(summary.rejects.len(), 1);
+        assert!(matches!(
+            summary.rejects[0],
+            PatchReject::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn applies_modify_add_delete_and_rename() {
+        let patch = patch(
+            r#"{
+              "changes": {
+                "modified.txt": { "before": "one\n", "after": "two\n" },
+                "added.txt": { "after": "new\n" },
+                "deleted.txt": { "before": "old\n" },
+                "new.txt": { "before": "same\n", "after": "same\n", "moved": "old.txt" }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let request = serde_json::json!({
+            "files": {
+                "modified.txt": "one\n",
+                "deleted.txt": "old\n",
+                "old.txt": "same\n"
+            },
+            "patch": patch,
+        });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Applied { files, changes } => {
+                assert_eq!(
+                    files.get("modified.txt").map(|file| file.content.as_str()),
+                    Some("two\n")
+                );
+                assert_eq!(
+                    files.get("added.txt").map(|file| file.content.as_str()),
+                    Some("new\n")
+                );
+                assert!(!files.contains_key("deleted.txt"));
+                assert!(!files.contains_key("old.txt"));
+                assert_eq!(
+                    files.get("new.txt").map(|file| file.content.as_str()),
+                    Some("same\n")
+                );
+                assert_eq!(changes.len(), 4);
+            }
+            ApplyPatchResult::Rejected { rejects, .. } => panic!("unexpected rejects: {rejects:?}"),
+        }
+    }
+
+    #[test]
+    fn applies_mode_only_patch() {
+        let patch = patch(
+            r#"{
+              "changes": {
+                "script.sh": { "before": "echo hi\n", "after": "echo hi\n", "mode": { "before": "100644", "after": "100755" } }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let request = serde_json::json!({
+            "files": { "script.sh": { "content": "echo hi\n", "mode": "100644" } },
+            "patch": patch,
+        });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Applied { files, changes } => {
+                assert_eq!(
+                    files.get("script.sh").and_then(|file| file.mode.as_deref()),
+                    Some("100755")
+                );
+                assert_eq!(changes.len(), 1);
+            }
+            ApplyPatchResult::Rejected { rejects, .. } => panic!("unexpected rejects: {rejects:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_normalized_snapshot_paths() {
+        let result = apply(
+            r#"{
+              "files": {
+                "dir/file.txt": "one\n",
+                "dir\\file.txt": "two\n"
+              },
+              "patch": ""
+            }"#,
+        );
+        match result {
+            Ok(output) => panic!("expected duplicate path rejection, got {output:?}"),
+            Err(error) => assert!(error.to_string().contains("duplicate normalized path")),
+        }
+    }
+
+    #[test]
+    fn returns_rejects_without_mutating_snapshot() {
+        let patch = patch(
+            r#"{
+              "changes": {
+                "a.txt": { "before": "one\n", "after": "two\n" }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        let request = serde_json::json!({
+            "files": { "a.txt": "changed\n" },
+            "patch": patch,
+        });
+
+        match apply(&request.to_string()).unwrap_or_else(|error| panic!("{error}")) {
+            ApplyPatchResult::Rejected { files, rejects } => {
+                assert_eq!(
+                    files.get("a.txt").map(|file| file.content.as_str()),
+                    Some("changed\n")
+                );
+                assert_eq!(rejects.len(), 1);
+                assert!(matches!(rejects[0], PatchReject::ContentMismatch { .. }));
+            }
+            ApplyPatchResult::Applied { .. } => panic!("expected reject"),
+        }
     }
 
     #[test]

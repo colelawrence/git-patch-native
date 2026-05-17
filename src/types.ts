@@ -41,6 +41,60 @@ export interface GeneratePatchRequest {
   options?: GeneratePatchOptions;
 }
 
+export interface FileEntry {
+  content: FileContent;
+  mode?: GitFileMode;
+}
+
+export type FileSnapshot = Record<Path, FileContent | FileEntry>;
+
+export interface ApplyPatchRequest {
+  files: FileSnapshot;
+  patch: string;
+}
+
+export interface InspectPatchRequest {
+  patch: string;
+}
+
+export interface PatchSummary {
+  files: PatchFileSummary[];
+  rejects: PatchReject[];
+}
+
+export type PatchFileSummary =
+  | { _tag: "Added"; path: Path }
+  | { _tag: "Modified"; path: Path }
+  | { _tag: "Deleted"; path: Path }
+  | { _tag: "Renamed"; from: Path; to: Path }
+  | { _tag: "Copied"; from: Path; to: Path };
+
+export type ApplyPatchResult =
+  | {
+      _tag: "Applied";
+      files: Record<Path, FileEntry>;
+      changes: AppliedPatchChange[];
+    }
+  | {
+      _tag: "Rejected";
+      files: Record<Path, FileEntry>;
+      rejects: PatchReject[];
+    };
+
+export type AppliedPatchChange =
+  | { _tag: "Added"; path: Path; after: FileEntry }
+  | { _tag: "Modified"; path: Path; before: FileEntry; after: FileEntry }
+  | { _tag: "Deleted"; path: Path; before: FileEntry }
+  | { _tag: "Renamed"; from: Path; to: Path; before: FileEntry; after: FileEntry };
+
+export type PatchReject =
+  | { _tag: "MissingFile"; path: Path; operation: string; patch: string; message: string }
+  | { _tag: "AlreadyExists"; path: Path; operation: string; patch: string; message: string }
+  | { _tag: "ContentMismatch"; path: Path; operation: string; hunk?: number; patch: string; message: string }
+  | { _tag: "Unsupported"; operation: string; patch: string; message: string };
+
 export interface NativeBinding {
   generatePatchJson(inputJson: string): string;
+  applyPatchJson(inputJson: string): string;
+  inspectPatchJson(inputJson: string): string;
 }
