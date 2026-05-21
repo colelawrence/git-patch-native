@@ -19,6 +19,14 @@ const patch = generatePatch({
     after: "same\n",
   },
 });
+
+const patchWithDetectedRenames = generatePatch(
+  {
+    "src/old-name.ts": { before: "export const value = 1;\n" },
+    "src/new-name.ts": { after: "export const value = 2;\n" },
+  },
+  { renameSimilarityThreshold: 70 },
+);
 ```
 
 ## API shape
@@ -31,10 +39,17 @@ type GitFileMode = "100644" | "100755";
 type Changes = Record<string, {
   before?: string | null; // omitted for additions
   after?: string | null;  // omitted for deletions
-  moved?: string | { from: string; similarity?: number };
+  moved?: string | { from: string; similarity?: number }; // similarity is an integer 0..100
   mode?: GitFileMode | { before?: GitFileMode | null; after?: GitFileMode | null };
 }>;
+
+type GeneratePatchOptions = {
+  contextLines?: number;
+  renameSimilarityThreshold?: number; // opt-in delete/add rename detection, integer 0..100
+};
 ```
+
+Automatic rename detection is opt-in. When integer `renameSimilarityThreshold` is set, plain deletion/addition pairs are matched one-to-one and emitted as renames when their computed text similarity is at least the threshold. Matching maximizes rename count first, then similarity and deterministic tie-breaks. Explicit `moved` entries remain authoritative.
 
 `inspectPatch(patch)` parses a text patch into file-level operations and rejects. `applyPatch(files, patch)` applies a text patch to an in-memory snapshot and returns either the next snapshot or retryable rejects.
 
@@ -51,6 +66,7 @@ Apply is atomic by default: if any file patch fails, the returned `files` snapsh
 Guarantees for the initial contract:
 
 - deterministic path ordering
+- opt-in rename detection for plain delete/add pairs via `renameSimilarityThreshold`, using Rust-owned similarity and matching semantics
 - git-style `diff --git`, `---`, `+++`, hunk, add/delete, and rename headers
 - path separator normalization to `/`
 - Git-compatible C-style quoting for paths containing quotes or control characters

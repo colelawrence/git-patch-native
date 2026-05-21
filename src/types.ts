@@ -14,7 +14,7 @@ export interface FileModeChange {
 
 export interface RenameDetail {
   from: Path;
-  /** Git-style similarity percentage. Defaults to 100 when omitted. */
+  /** Git-style integer similarity percentage from 0 to 100. Defaults to 100 when omitted. */
   similarity?: number;
 }
 
@@ -34,6 +34,12 @@ export type Changes = Record<Path, FileChange>;
 export interface GeneratePatchOptions {
   /** Unified-diff context lines. Defaults to 3. Must be at least 1 for default git apply compatibility. */
   contextLines?: number;
+  /**
+   * Opt-in rename detection threshold as an integer from 0 to 100.
+   * When set, plain delete/add pairs with text similarity at or above this percentage
+   * are emitted as rename patches with the computed similarity index.
+   */
+  renameSimilarityThreshold?: number;
 }
 
 export interface GeneratePatchRequest {

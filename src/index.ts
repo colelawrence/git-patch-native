@@ -33,13 +33,17 @@ export function generatePatch(
   const request = isGeneratePatchRequest(changesOrRequest)
     ? changesOrRequest
     : { changes: changesOrRequest, options };
-  return loadNativeBinding().generatePatchJson(JSON.stringify(normalizeRequest(request)));
+  return loadNativeBinding().generatePatchJson(serializeRequest(normalizeRequest(request)));
 }
 
 export function applyPatch(files: FileSnapshot, patch: string): ApplyPatchResult;
 export function applyPatch(request: ApplyPatchRequest): ApplyPatchResult;
 export function applyPatch(filesOrRequest: FileSnapshot | ApplyPatchRequest, patch?: string): ApplyPatchResult {
-  const request = isApplyPatchRequest(filesOrRequest) ? filesOrRequest : { files: filesOrRequest, patch };
+  const request = patch !== undefined
+    ? { files: filesOrRequest as FileSnapshot, patch }
+    : isApplyPatchRequest(filesOrRequest)
+      ? filesOrRequest
+      : { files: filesOrRequest, patch };
   if (typeof request.patch !== "string") throw new TypeError("applyPatch requires a patch string");
   return JSON.parse(loadNativeBinding().applyPatchJson(JSON.stringify(request))) as ApplyPatchResult;
 }
@@ -53,11 +57,13 @@ export function inspectPatch(patchOrRequest: string | InspectPatchRequest): Patc
 }
 
 function isGeneratePatchRequest(value: Changes | GeneratePatchRequest): value is GeneratePatchRequest {
-  return typeof value === "object" && value !== null && "changes" in value;
+  if (!isRecord(value) || !("changes" in value)) return false;
+  if ("options" in value) return true;
+  return isRecord(value.changes) && !isFileChangeLike(value.changes);
 }
 
 function isApplyPatchRequest(value: FileSnapshot | ApplyPatchRequest): value is ApplyPatchRequest {
-  return typeof value === "object" && value !== null && "files" in value && "patch" in value;
+  return isRecord(value) && isRecord(value.files) && typeof value.patch === "string";
 }
 
 function normalizeRequest(request: GeneratePatchRequest): GeneratePatchRequest {
@@ -74,4 +80,62 @@ function normalizeRequest(request: GeneratePatchRequest): GeneratePatchRequest {
     ),
     options: request.options,
   };
+}
+
+function serializeRequest(request: GeneratePatchRequest): string {
+  assertGeneratePatchIntegers(request);
+  return JSON.stringify(request, (_key, value) => {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("generatePatch only accepts finite numeric options");
+    }
+    return value;
+  });
+}
+
+function assertGeneratePatchIntegers(request: GeneratePatchRequest): void {
+  if (request.options?.contextLines !== undefined) {
+    assertInteger("contextLines", request.options.contextLines, 1);
+  }
+  if (request.options?.renameSimilarityThreshold !== undefined) {
+    assertInteger("renameSimilarityThreshold", request.options.renameSimilarityThreshold, 0, 100);
+  }
+
+  for (const [path, change] of Object.entries(request.changes)) {
+    const moved = change.moved;
+    if (isRecord(moved) && "similarity" in moved && moved.similarity !== undefined) {
+      assertInteger(`${path}.moved.similarity`, moved.similarity, 0, 100);
+    }
+  }
+}
+
+function assertInteger(name: string, value: unknown, min: number, max?: number): void {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || (max !== undefined && value > max)) {
+    const range = max === undefined ? `at least ${min}` : `between ${min} and ${max}`;
+    throw new TypeError(`${name} must be an integer ${range}`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isFileChangeLike(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const hasFileChangeKey = "before" in value || "after" in value || "moved" in value || "mode" in value;
+  return hasFileChangeKey && isOptionalString(value.before) && isOptionalString(value.after) && isMovedLike(value.moved) && isModeLike(value.mode);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isMovedLike(value: unknown): boolean {
+  if (value === undefined || typeof value === "string") return true;
+  return isRecord(value) && (value.from === undefined || typeof value.from === "string");
+}
+
+function isModeLike(value: unknown): boolean {
+  if (value === undefined || typeof value === "string") return true;
+  if (!isRecord(value)) return false;
+  return isOptionalString(value.before) && isOptionalString(value.after);
 }

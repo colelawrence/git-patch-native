@@ -1,7 +1,7 @@
 use diffy::patch_set::{FileMode as DiffyFileMode, FileOperation, ParseOptions, PatchSet};
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,7 +30,7 @@ pub struct PatchRequest {
     pub options: PatchOptions,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileChange {
     #[serde(default)]
@@ -43,7 +43,7 @@ pub struct FileChange {
     pub mode: Option<ModeInput>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum ModeInput {
     Shorthand(String),
@@ -91,13 +91,13 @@ impl ModeTransition {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum Moved {
     From(String),
     Detail {
         from: String,
-        similarity: Option<u8>,
+        similarity: Option<i64>,
     },
 }
 
@@ -109,7 +109,7 @@ impl Moved {
         }
     }
 
-    fn similarity(&self) -> Option<u8> {
+    fn similarity(&self) -> Option<i64> {
         match self {
             Self::From(_) => None,
             Self::Detail { similarity, .. } => *similarity,
@@ -122,12 +122,15 @@ impl Moved {
 pub struct PatchOptions {
     #[serde(default = "default_context_lines")]
     pub context_lines: usize,
+    #[serde(default)]
+    pub rename_similarity_threshold: Option<i64>,
 }
 
 impl Default for PatchOptions {
     fn default() -> Self {
         Self {
             context_lines: default_context_lines(),
+            rename_similarity_threshold: None,
         }
     }
 }
@@ -268,23 +271,38 @@ pub fn inspect_patch_from_json(input: &str) -> Result<String, PatchError> {
 pub fn generate_patch(request: &PatchRequest) -> Result<String, PatchError> {
     validate_options(&request.options)?;
 
-    let mut normalized_changes = BTreeMap::<String, (&str, &FileChange)>::new();
+    let mut normalized_changes = BTreeMap::<String, NormalizedChange>::new();
 
     for (path, change) in &request.changes {
         validate_change(path, change)?;
         let normalized = normalize_and_validate_path(path, path)?;
-        if let Some((first, _)) = normalized_changes.insert(normalized.clone(), (path, change)) {
+        if let Some(first) = normalized_changes.insert(
+            normalized.clone(),
+            NormalizedChange {
+                original_path: path.clone(),
+                change: change.clone(),
+            },
+        ) {
             return Err(PatchError::DuplicatePath {
                 normalized,
-                first: first.to_owned(),
+                first: first.original_path,
                 second: path.to_owned(),
             });
         }
     }
 
+    if let Some(threshold) = request.options.rename_similarity_threshold {
+        detect_renames(&mut normalized_changes, threshold as u8)?;
+    }
+
     let mut out = String::new();
-    for (normalized_path, (_, change)) in normalized_changes {
-        emit_file_patch(&normalized_path, change, &request.options, &mut out)?;
+    for (normalized_path, normalized) in normalized_changes {
+        emit_file_patch(
+            &normalized_path,
+            &normalized.change,
+            &request.options,
+            &mut out,
+        )?;
     }
     Ok(out)
 }
@@ -859,7 +877,47 @@ fn validate_options(options: &PatchOptions) -> Result<(), PatchError> {
             message: "must be at least 1 so patches apply with default git apply".to_owned(),
         });
     }
+    if options
+        .rename_similarity_threshold
+        .is_some_and(|threshold| !(0..=100).contains(&threshold))
+    {
+        return Err(PatchError::InvalidOption {
+            name: "renameSimilarityThreshold".to_owned(),
+            message: "must be between 0 and 100".to_owned(),
+        });
+    }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct NormalizedChange {
+    original_path: String,
+    change: FileChange,
+}
+
+#[derive(Clone, Debug)]
+struct RenameSide {
+    path: String,
+    content: String,
+    mode: FileMode,
+}
+
+#[derive(Clone, Debug)]
+struct RenameCandidate {
+    delete_index: usize,
+    add_index: usize,
+    delete_path: String,
+    add_path: String,
+    similarity: u8,
+    basename_match: bool,
+    size_delta: usize,
+}
+
+#[derive(Clone, Debug)]
+struct SelectedRename {
+    delete_path: String,
+    add_path: String,
+    similarity: u8,
 }
 
 fn validate_change(path: &str, change: &FileChange) -> Result<(), PatchError> {
@@ -885,7 +943,7 @@ fn validate_change(path: &str, change: &FileChange) -> Result<(), PatchError> {
         normalize_and_validate_path(path, moved.source_path())?;
         if moved
             .similarity()
-            .is_some_and(|similarity| similarity > 100)
+            .is_some_and(|similarity| !(0..=100).contains(&similarity))
         {
             return invalid(path, "similarity must be between 0 and 100");
         }
@@ -982,6 +1040,331 @@ fn invalid<T>(path: &str, message: &str) -> Result<T, PatchError> {
         path: path.to_owned(),
         message: message.to_owned(),
     })
+}
+
+fn detect_renames(
+    changes: &mut BTreeMap<String, NormalizedChange>,
+    threshold: u8,
+) -> Result<(), PatchError> {
+    let mut deletes = Vec::new();
+    let mut adds = Vec::new();
+
+    for (path, normalized) in changes.iter() {
+        let change = &normalized.change;
+        if change.moved.is_some() {
+            continue;
+        }
+        let mode = resolve_mode_transition(path, change)?;
+        match (change.before.as_ref(), change.after.as_ref()) {
+            (Some(before), None) => deletes.push(RenameSide {
+                path: path.clone(),
+                content: before.clone(),
+                mode: mode.before.unwrap_or(FileMode::Regular),
+            }),
+            (None, Some(after)) => adds.push(RenameSide {
+                path: path.clone(),
+                content: after.clone(),
+                mode: mode.after.unwrap_or(FileMode::Regular),
+            }),
+            _ => {}
+        }
+    }
+
+    if deletes.is_empty() || adds.is_empty() {
+        return Ok(());
+    }
+
+    let selected = select_rename_matches(&deletes, &adds, threshold);
+
+    let delete_modes: BTreeMap<String, FileMode> = deletes
+        .into_iter()
+        .map(|side| (side.path, side.mode))
+        .collect();
+    let add_modes: BTreeMap<String, FileMode> = adds
+        .into_iter()
+        .map(|side| (side.path, side.mode))
+        .collect();
+
+    for rename in selected {
+        let Some(delete) = changes.remove(&rename.delete_path) else {
+            continue;
+        };
+        let Some(mut add) = changes.remove(&rename.add_path) else {
+            changes.insert(rename.delete_path.clone(), delete);
+            continue;
+        };
+
+        let before_mode = delete_modes
+            .get(&rename.delete_path)
+            .copied()
+            .unwrap_or(FileMode::Regular);
+        let after_mode = add_modes
+            .get(&rename.add_path)
+            .copied()
+            .unwrap_or(FileMode::Regular);
+
+        add.change = FileChange {
+            before: delete.change.before,
+            after: add.change.after,
+            moved: Some(Moved::Detail {
+                from: rename.delete_path.clone(),
+                similarity: Some(i64::from(rename.similarity)),
+            }),
+            mode: if before_mode == after_mode {
+                None
+            } else {
+                Some(ModeInput::Change {
+                    before: Some(before_mode.as_str().to_owned()),
+                    after: Some(after_mode.as_str().to_owned()),
+                })
+            },
+        };
+
+        changes.insert(rename.add_path, add);
+    }
+
+    Ok(())
+}
+
+fn select_rename_matches(
+    deletes: &[RenameSide],
+    adds: &[RenameSide],
+    threshold: u8,
+) -> Vec<SelectedRename> {
+    let mut matcher = RenameMatcher::new(deletes.len(), adds.len());
+
+    for (delete_index, delete) in deletes.iter().enumerate() {
+        for (add_index, add) in adds.iter().enumerate() {
+            let similarity = text_similarity_percent(&delete.content, &add.content);
+            if similarity >= threshold {
+                matcher.add_candidate(RenameCandidate {
+                    delete_index,
+                    add_index,
+                    delete_path: delete.path.clone(),
+                    add_path: add.path.clone(),
+                    similarity,
+                    basename_match: basename(&delete.path) == basename(&add.path),
+                    size_delta: delete.content.len().abs_diff(add.content.len()),
+                });
+            }
+        }
+    }
+
+    matcher.solve()
+}
+
+// Computes a maximum-weight one-to-one matching over eligible delete/add pairs.
+// Every real edge carries a large cardinality bonus, so the primary objective is
+// maximum rename count; similarity, basename, and size delta only break ties.
+struct RenameMatcher {
+    graph: Vec<Vec<FlowEdge>>,
+    candidates: Vec<RenameCandidate>,
+    candidate_edges: Vec<(usize, usize)>,
+    add_offset: usize,
+    sink: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FlowEdge {
+    to: usize,
+    rev: usize,
+    cap: i32,
+    cost: i64,
+    candidate_index: Option<usize>,
+}
+
+impl RenameMatcher {
+    fn new(delete_count: usize, add_count: usize) -> Self {
+        let add_offset = 1 + delete_count;
+        let sink = add_offset + add_count;
+        let mut matcher = Self {
+            graph: vec![Vec::new(); sink + 1],
+            candidates: Vec::new(),
+            candidate_edges: Vec::new(),
+            add_offset,
+            sink,
+        };
+
+        for delete_index in 0..delete_count {
+            matcher.add_edge(0, 1 + delete_index, 1, 0, None);
+        }
+        for add_index in 0..add_count {
+            matcher.add_edge(add_offset + add_index, sink, 1, 0, None);
+        }
+
+        matcher
+    }
+
+    fn add_candidate(&mut self, candidate: RenameCandidate) {
+        let from = 1 + candidate.delete_index;
+        let to = self.add_offset + candidate.add_index;
+        let candidate_index = self.candidates.len();
+        let edge_index = self.graph[from].len();
+        let score = rename_candidate_score(&candidate);
+
+        self.candidates.push(candidate);
+        self.candidate_edges.push((from, edge_index));
+        self.add_edge(from, to, 1, -score, Some(candidate_index));
+    }
+
+    fn add_edge(
+        &mut self,
+        from: usize,
+        to: usize,
+        cap: i32,
+        cost: i64,
+        candidate_index: Option<usize>,
+    ) {
+        let reverse_from = self.graph[to].len();
+        let reverse_to = self.graph[from].len();
+        self.graph[from].push(FlowEdge {
+            to,
+            rev: reverse_from,
+            cap,
+            cost,
+            candidate_index,
+        });
+        self.graph[to].push(FlowEdge {
+            to: from,
+            rev: reverse_to,
+            cap: 0,
+            cost: -cost,
+            candidate_index: None,
+        });
+    }
+
+    fn solve(mut self) -> Vec<SelectedRename> {
+        while self.augment_best_negative_path() {}
+
+        let mut selected = Vec::new();
+        for (from, edge_index) in &self.candidate_edges {
+            let edge = &self.graph[*from][*edge_index];
+            if edge.cap == 0 {
+                let Some(candidate_index) = edge.candidate_index else {
+                    continue;
+                };
+                let candidate = &self.candidates[candidate_index];
+                selected.push(SelectedRename {
+                    delete_path: candidate.delete_path.clone(),
+                    add_path: candidate.add_path.clone(),
+                    similarity: candidate.similarity,
+                });
+            }
+        }
+        selected.sort_by(|left, right| left.add_path.cmp(&right.add_path));
+        selected
+    }
+
+    fn augment_best_negative_path(&mut self) -> bool {
+        let node_count = self.graph.len();
+        let mut distance = vec![i64::MAX; node_count];
+        let mut parent = vec![None::<(usize, usize)>; node_count];
+        let mut queued = vec![false; node_count];
+        let mut queue = std::collections::VecDeque::new();
+
+        distance[0] = 0;
+        queued[0] = true;
+        queue.push_back(0);
+
+        while let Some(node) = queue.pop_front() {
+            queued[node] = false;
+            for (edge_index, edge) in self.graph[node].iter().enumerate() {
+                if edge.cap <= 0 || distance[node] == i64::MAX {
+                    continue;
+                }
+                let next_distance = distance[node] + edge.cost;
+                if next_distance < distance[edge.to] {
+                    distance[edge.to] = next_distance;
+                    parent[edge.to] = Some((node, edge_index));
+                    if !queued[edge.to] {
+                        queued[edge.to] = true;
+                        queue.push_back(edge.to);
+                    }
+                }
+            }
+        }
+
+        if distance[self.sink] >= 0 {
+            return false;
+        }
+
+        let mut node = self.sink;
+        while let Some((from, edge_index)) = parent[node] {
+            let to = self.graph[from][edge_index].to;
+            let reverse = self.graph[from][edge_index].rev;
+            self.graph[from][edge_index].cap -= 1;
+            self.graph[to][reverse].cap += 1;
+            node = from;
+        }
+
+        true
+    }
+}
+
+fn rename_candidate_score(candidate: &RenameCandidate) -> i64 {
+    const CARDINALITY_WEIGHT: i64 = 1_000_000_000_000;
+    const SIMILARITY_WEIGHT: i64 = 10_000_000;
+    const BASENAME_WEIGHT: i64 = 1_000_000;
+    const SIZE_SCORE_MAX: i64 = 999_999;
+
+    let size_score = SIZE_SCORE_MAX - (candidate.size_delta as i64).min(SIZE_SCORE_MAX);
+    CARDINALITY_WEIGHT
+        + i64::from(candidate.similarity) * SIMILARITY_WEIGHT
+        + if candidate.basename_match {
+            BASENAME_WEIGHT
+        } else {
+            0
+        }
+        + size_score
+}
+
+fn text_similarity_percent(before: &str, after: &str) -> u8 {
+    if before == after {
+        return 100;
+    }
+    if before.is_empty() || after.is_empty() {
+        return 0;
+    }
+
+    let line_ratio = TextDiff::from_lines(before, after).ratio();
+    let token_ratio = token_multiset_similarity(before, after);
+    let ratio = line_ratio.max(token_ratio);
+    ((ratio * 100.0).floor() as u8).min(99)
+}
+
+fn token_multiset_similarity(before: &str, after: &str) -> f32 {
+    let before_tokens = token_counts(before);
+    let after_tokens = token_counts(after);
+    let mut intersection = 0usize;
+    let mut union = 0usize;
+
+    for (token, before_count) in &before_tokens {
+        let after_count = after_tokens.get(token).copied().unwrap_or(0);
+        intersection += (*before_count).min(after_count);
+        union += (*before_count).max(after_count);
+    }
+    for (token, after_count) in &after_tokens {
+        if !before_tokens.contains_key(token) {
+            union += *after_count;
+        }
+    }
+
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f32 / union as f32
+}
+
+fn token_counts(value: &str) -> HashMap<&str, usize> {
+    let mut counts = HashMap::new();
+    for token in value.split_whitespace() {
+        *counts.entry(token).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn emit_file_patch(
@@ -1160,11 +1543,31 @@ fn unified_diff(
 
     for group in groups {
         let Some(first) = group.first() else { continue };
-        let Some(last) = group.last() else { continue };
         let old_start_idx = first.old_range().start;
         let new_start_idx = first.new_range().start;
-        let old_len = last.old_range().end.saturating_sub(old_start_idx);
-        let new_len = last.new_range().end.saturating_sub(new_start_idx);
+        let mut old_len = 0usize;
+        let mut new_len = 0usize;
+        let mut lines = Vec::new();
+
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                match change.tag() {
+                    ChangeTag::Delete => {
+                        old_len += 1;
+                        lines.push(('-', change.value()));
+                    }
+                    ChangeTag::Insert => {
+                        new_len += 1;
+                        lines.push(('+', change.value()));
+                    }
+                    ChangeTag::Equal => {
+                        old_len += 1;
+                        new_len += 1;
+                        lines.push((' ', change.value()));
+                    }
+                }
+            }
+        }
 
         out.push_str("@@ -");
         out.push_str(&range_header_start(old_start_idx, old_len).to_string());
@@ -1176,14 +1579,8 @@ fn unified_diff(
         out.push_str(&new_len.to_string());
         out.push_str(" @@\n");
 
-        for op in group {
-            for change in diff.iter_changes(&op) {
-                match change.tag() {
-                    ChangeTag::Delete => emit_line('-', change.value(), &mut out),
-                    ChangeTag::Insert => emit_line('+', change.value(), &mut out),
-                    ChangeTag::Equal => emit_line(' ', change.value(), &mut out),
-                }
-            }
+        for (prefix, value) in lines {
+            emit_line(prefix, value, &mut out);
         }
     }
 
@@ -1527,6 +1924,50 @@ mod tests {
     }
 
     #[test]
+    fn emits_valid_hunk_lengths_for_repeated_lines() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "repeated.txt": { "before": "a\na\na\nb\n", "after": "a\na\nb\nb\n" }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(output.contains("@@ -1,4 +1,4 @@\n"));
+    }
+
+    #[test]
+    fn emits_exact_edge_hunk_headers() {
+        let added = patch(r#"{ "changes": { "one.txt": { "after": "one\n" } } }"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(added.contains("@@ -0,0 +1,1 @@\n+one\n"));
+
+        let deleted = patch(r#"{ "changes": { "one.txt": { "before": "one\n" } } }"#)
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert!(deleted.contains("@@ -1,1 +0,0 @@\n-one\n"));
+    }
+
+    #[test]
+    fn emits_rename_chmod_edit_headers_in_git_order() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "new.sh": {
+                  "before": "echo old\n",
+                  "after": "echo new\n",
+                  "moved": { "from": "old.sh", "similarity": 80 },
+                  "mode": { "before": "100644", "after": "100755" }
+                }
+              }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(output.starts_with(
+            "diff --git a/old.sh b/new.sh\nold mode 100644\nnew mode 100755\nsimilarity index 80%\nrename from old.sh\nrename to new.sh\n--- a/old.sh\n+++ b/new.sh\n"
+        ));
+    }
+
+    #[test]
     fn emits_add_delete_and_rename_headers() {
         let output = patch(
             r#"{
@@ -1541,6 +1982,87 @@ mod tests {
         assert!(output.contains("new file mode 100644\n"));
         assert!(output.contains("deleted file mode 100644\n"));
         assert!(output.contains("rename from old.txt\nrename to new.txt\n"));
+    }
+
+    #[test]
+    fn auto_detects_renames_from_delete_add_pairs() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "old.txt": { "before": "one\ntwo\nthree\nfour\n" },
+                "new.txt": { "after": "one\ntwo\nTHREE\nfour\n" }
+              },
+              "options": { "renameSimilarityThreshold": 70 }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(output.contains("similarity index 75%\nrename from old.txt\nrename to new.txt\n"));
+        assert!(output.contains("--- a/old.txt\n+++ b/new.txt\n"));
+        assert!(!output.contains("deleted file mode"));
+        assert!(!output.contains("new file mode"));
+    }
+
+    #[test]
+    fn auto_detected_renames_use_global_optimum() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "old-a.txt": { "before": "a\na\na\nb\n" },
+                "old-b.txt": { "before": "a\na\na\na\n" },
+                "new-x.txt": { "after": "a\na\na\nb\n" },
+                "new-y.txt": { "after": "a\na\nb\nb\n" }
+              },
+              "options": { "renameSimilarityThreshold": 70 }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(output.contains("rename from old-b.txt\nrename to new-x.txt\n"));
+        assert!(output.contains("rename from old-a.txt\nrename to new-y.txt\n"));
+        assert_eq!((output.match_indices("rename from").count()), 2);
+        assert!(!output.contains("deleted file mode"));
+        assert!(!output.contains("new file mode"));
+    }
+
+    #[test]
+    fn explicit_renames_are_not_auto_remapped() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "explicit-new.txt": { "before": "same\n", "after": "same\n", "moved": { "from": "explicit-old.txt", "similarity": 88 } },
+                "auto-old.txt": { "before": "auto\n" },
+                "auto-new.txt": { "after": "auto\n" }
+              },
+              "options": { "renameSimilarityThreshold": 100 }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+
+        assert!(
+            output.contains(
+                "similarity index 100%\nrename from auto-old.txt\nrename to auto-new.txt\n"
+            )
+        );
+        assert!(output.contains(
+            "similarity index 88%\nrename from explicit-old.txt\nrename to explicit-new.txt\n"
+        ));
+        assert_eq!((output.match_indices("rename from").count()), 2);
+    }
+
+    #[test]
+    fn auto_detected_renames_preserve_mode_changes() {
+        let output = patch(
+            r#"{
+              "changes": {
+                "old.sh": { "before": "echo hi\n", "mode": { "before": "100644" } },
+                "new.sh": { "after": "echo hi\n", "mode": { "after": "100755" } }
+              },
+              "options": { "renameSimilarityThreshold": 100 }
+            }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(output.contains("old mode 100644\nnew mode 100755\nsimilarity index 100%\n"));
+        assert!(output.contains("rename from old.sh\nrename to new.sh\n"));
     }
 
     #[test]
@@ -1616,6 +2138,8 @@ mod tests {
             r#"{ "changes": { "bad.txt": { "after": "x\n", "mode": "100600" } } }"#,
             r#"{ "changes": { "bad.txt": { "before": "x\n", "after": "x\n", "mode": "100755" } } }"#,
             r#"{ "changes": { "bad.txt": { "before": "x\n", "after": "x\n", "moved": { "from": "old.txt", "similarity": 101 } } } }"#,
+            r#"{ "changes": { "bad.txt": { "before": "x\n", "after": "x\n", "moved": { "from": "old.txt", "similarity": -1 } } } }"#,
+            r#"{ "changes": { "bad.txt": { "before": "x\n", "after": "x\n", "moved": { "from": "old.txt", "similarity": 999999 } } } }"#,
         ] {
             assert!(patch(input).is_err(), "expected rejection for {input}");
         }

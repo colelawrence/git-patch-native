@@ -214,6 +214,74 @@ const scenarios = [
     after: { "src/new-name.ts": "export const name = 'new';\n" },
   },
   {
+    name: "auto-detected rename only",
+    before: { "src/old-auto.ts": "export const name = 'same';\n" },
+    changes: {
+      "src/old-auto.ts": { before: "export const name = 'same';\n" },
+      "src/new-auto.ts": { after: "export const name = 'same';\n" },
+    },
+    options: { renameSimilarityThreshold: 90 },
+    after: { "src/new-auto.ts": "export const name = 'same';\n" },
+    inspect(patch) {
+      assert.match(patch, /similarity index 100%\nrename from src\/old-auto\.ts\nrename to src\/new-auto\.ts/);
+      assert.equal((patch.match(/^diff --git /gm) ?? []).length, 1);
+    },
+  },
+  {
+    name: "auto-detected rename plus edit",
+    before: { "src/old-edit.ts": "one\ntwo\nthree\nfour\n" },
+    changes: {
+      "src/old-edit.ts": { before: "one\ntwo\nthree\nfour\n" },
+      "src/new-edit.ts": { after: "one\ntwo\nTHREE\nfour\n" },
+    },
+    options: { renameSimilarityThreshold: 70 },
+    after: { "src/new-edit.ts": "one\ntwo\nTHREE\nfour\n" },
+    inspect(patch) {
+      assert.match(patch, /similarity index 75%\nrename from src\/old-edit\.ts\nrename to src\/new-edit\.ts/);
+      assert.match(patch, /^@@ /m);
+    },
+  },
+  {
+    name: "auto-detected renames use global optimum",
+    before: {
+      "old-a.txt": "a\na\na\nb\n",
+      "old-b.txt": "a\na\na\na\n",
+    },
+    changes: {
+      "old-a.txt": { before: "a\na\na\nb\n" },
+      "old-b.txt": { before: "a\na\na\na\n" },
+      "new-x.txt": { after: "a\na\na\nb\n" },
+      "new-y.txt": { after: "a\na\nb\nb\n" },
+    },
+    options: { renameSimilarityThreshold: 70 },
+    after: {
+      "new-x.txt": "a\na\na\nb\n",
+      "new-y.txt": "a\na\nb\nb\n",
+    },
+    inspect(patch) {
+      assert.match(patch, /rename from old-b\.txt\nrename to new-x\.txt/);
+      assert.match(patch, /rename from old-a\.txt\nrename to new-y\.txt/);
+      assert.equal((patch.match(/rename from/g) ?? []).length, 2);
+      assert.doesNotMatch(patch, /(?:deleted|new) file mode/);
+    },
+  },
+  {
+    name: "auto-detected rename below threshold remains delete plus add",
+    before: { "src/old-low.ts": "one\ntwo\nthree\nfour\n" },
+    changes: {
+      "src/old-low.ts": { before: "one\ntwo\nthree\nfour\n" },
+      "src/new-low.ts": { after: "one\ntwo\nTHREE\nfour\n" },
+    },
+    options: { renameSimilarityThreshold: 90 },
+    after: { "src/new-low.ts": "one\ntwo\nTHREE\nfour\n" },
+    inspect(patch) {
+      assert.doesNotMatch(patch, /rename from/);
+      assert.match(patch, /deleted file mode 100644/);
+      assert.match(patch, /new file mode 100644/);
+      assert.equal((patch.match(/^diff --git /gm) ?? []).length, 2);
+    },
+  },
+  {
     name: "paths with spaces unicode leading dash quotes and punctuation",
     changes: {
       "dir with space/file name.txt": { after: "space\n" },
@@ -511,6 +579,45 @@ assert.deepEqual(
   ["a.txt", "m.txt", "z.txt"],
 );
 
+const fileNamedChangesPatch = generatePatch({ changes: { after: "literal file named changes\n" } });
+assert.match(fileNamedChangesPatch, /^diff --git a\/changes b\/changes\n/);
+assert.match(fileNamedChangesPatch, /\+literal file named changes/);
+
+const requestShapePatch = generatePatch({ changes: { "request-shape.txt": { after: "request\n" } } });
+assert.match(requestShapePatch, /^diff --git a\/request-shape\.txt b\/request-shape\.txt\n/);
+
+const fileNamedFilesAndPatch = { files: "old files\n", patch: "old patch\n" };
+const filesAndPatchNamesPatch = generatePatch({
+  files: { before: "old files\n", after: "new files\n" },
+  patch: { before: "old patch\n", after: "new patch\n" },
+});
+const filesAndPatchResult = applyPatch(fileNamedFilesAndPatch, filesAndPatchNamesPatch);
+assert.equal(filesAndPatchResult._tag, "Applied");
+assert.equal(filesAndPatchResult.files.files.content, "new files\n");
+assert.equal(filesAndPatchResult.files.patch.content, "new patch\n");
+
+const equalTieA = generatePatch(
+  {
+    "old-a.txt": { before: "same\n" },
+    "old-b.txt": { before: "same\n" },
+    "new-a.txt": { after: "same\n" },
+    "new-b.txt": { after: "same\n" },
+  },
+  { renameSimilarityThreshold: 100 },
+);
+const equalTieB = generatePatch(
+  {
+    "new-b.txt": { after: "same\n" },
+    "old-b.txt": { before: "same\n" },
+    "new-a.txt": { after: "same\n" },
+    "old-a.txt": { before: "same\n" },
+  },
+  { renameSimilarityThreshold: 100 },
+);
+assert.equal(equalTieA, equalTieB);
+assert.match(equalTieA, /rename from old-a\.txt\nrename to new-a\.txt/);
+assert.match(equalTieA, /rename from old-b\.txt\nrename to new-b\.txt/);
+
 assert.equal(generatePatch({ "same.txt": { before: "same\n", after: "same\n" } }), "");
 
 for (const [name, changes, message] of [
@@ -520,7 +627,9 @@ for (const [name, changes, message] of [
   ["absolute path", { "/bad.txt": { after: "x\n" } }, /absolute paths/],
   ["parent traversal", { "../bad.txt": { after: "x\n" } }, /path components/],
   ["duplicate normalized path", { "dir/file.txt": { after: "one\n" }, "dir\\file.txt": { after: "two\n" } }, /duplicate normalized path/],
-  ["invalid similarity", { "new.txt": { moved: { from: "old.txt", similarity: 101 }, before: "x\n", after: "x\n" } }, /similarity/],
+  ["invalid similarity", { "new.txt": { moved: { from: "old.txt", similarity: 101 }, before: "x\n", after: "x\n" } }, /similarity.*between 0 and 100/],
+  ["fractional similarity", { "new.txt": { moved: { from: "old.txt", similarity: 88.5 }, before: "x\n", after: "x\n" } }, /similarity.*integer/],
+  ["non-finite similarity", { "new.txt": { moved: { from: "old.txt", similarity: Number.NaN }, before: "x\n", after: "x\n" } }, /similarity.*integer/],
   ["invalid mode", { "bad.txt": { after: "x\n", mode: "100600" } }, /mode must/],
   ["scalar mode on modification", { "bad.txt": { before: "x\n", after: "y\n", mode: "100755" } }, /mode\.before and mode\.after/],
   ["add with mode.before", { "bad.txt": { after: "x\n", mode: { before: "100644" } } }, /mode\.before is not valid/],
@@ -537,5 +646,13 @@ assert.throws(
   () => generatePatch({ "zero.txt": { before: "a\nb\n", after: "a\nB\n" } }, { contextLines: 0 }),
   /contextLines.*at least 1/,
 );
+
+for (const threshold of [-1, 101, 999999, 70.5, Number.NaN, Number.POSITIVE_INFINITY, "70"]) {
+  assert.throws(
+    () => generatePatch({ "old.txt": { before: "x\n" }, "new.txt": { after: "x\n" } }, { renameSimilarityThreshold: threshold }),
+    /renameSimilarityThreshold.*between 0 and 100/,
+    `invalid renameSimilarityThreshold ${threshold}`,
+  );
+}
 
 console.log("e2e ok");
