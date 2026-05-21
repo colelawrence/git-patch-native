@@ -95,7 +95,7 @@ The native package is currently local-build first. `scripts/copy-native.mjs` cop
 - Node can import the package and load the Node-API addon.
 - Bun can `dlopen` the packaged FFI library through `bun:ffi`.
 
-The public SDK entrypoint remains `generatePatch`; the FFI surface is a low-level packaging/runtime artifact.
+The public SDK entrypoints are `generatePatch`, `inspectPatch`, and `applyPatch`; the FFI surface is a low-level packaging/runtime artifact.
 
 ## Publishing
 
